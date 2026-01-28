@@ -61,12 +61,13 @@ enum UIMode {
   MODE_CLOCK,
   MODE_POMODORO,
   MODE_ALARM,
+  MODE_DAYCOUNTER,
   MODE_DVD,
   MODE_GAME
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 6;       // Monitor, Pomodoro, Alarm, Day Counter, DVD, Game
 
 // ====== Pomodoro ======
 enum PomodoroState {
@@ -153,9 +154,9 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 
 // ========= Alarm icon =========
 void drawAlarmIcon() {
-  int x = 148;
-  tft.fillRect(x - 10, 0, 12, 12, CYBER_BG);
   if (!alarmEnabled) return;
+  int x = 148;
+  tft.fillRect(x - 10, 3, 12, 12, CYBER_BG);
 
   uint16_t c = CYBER_LIGHT; // cam
   tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
@@ -173,6 +174,7 @@ void connectWiFiAndSyncTime() {
   tft.print(WIFI_SSID);
   Serial.print("Connecting to wifi: ");
   Serial.println(WIFI_SSID);
+  // TODO optimise this by calling WiFi.disconnect() to close the connection and power off the module ?!?
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   uint8_t retry = 0;
@@ -408,6 +410,7 @@ void drawMenu() {
     "Monitor",
     "Pomodoro",
     "Alarm",
+    "Day Counter",
     "DVD",
     "Space Attack"
   };
@@ -844,6 +847,66 @@ void updateGameLogic(int encStep, bool firePressed, bool backPressed) {
   }
 }
 
+// ========= Day Counter =============
+
+bool dayCounterInited = false;
+int screenWidth = 0, screenHeigth = 0;
+
+void initDayCounter() {
+  dayCounterInited = true;
+  tft.fillScreen(CYBER_BG);
+
+  tft.drawRect(0, 0, tft.width() - 1, tft.height() - 1, CYBER_LIGHT);
+  Serial.print("w: ");
+  Serial.print(tft.width());
+  Serial.print("h: ");
+  Serial.println(tft.height());
+}
+
+void drawDayCounter(bool encPressed, bool backPressed) {
+  (void)encPressed;
+
+  /*if (backPressed) {
+    dayCounterInited = false;
+    currentMode = MODE_MENU;
+    drawMenu();
+    return;
+  }*/
+
+  Serial.println("counting");
+
+  tft.setCursor(8, 4);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.print("DAY COUNTER");
+  drawAlarmIcon();
+
+  // draw a circle for every day of the year (365 or 366)
+  /*for (int x = 0; x < 31; x++) {
+    for (int y = 0; y < 12; y++) {
+      tft.drawCircle(x + 8, y + 8, 3, CYBER_ACCENT);
+    }
+  }*/
+
+  int x = 5;
+  int y = 15;
+  int today = 24;
+  for (int i = 0; i < 365; i++) {
+
+    if (x >= tft.width() - 1) {
+      x = 5;
+      y += 6;
+    }
+
+    tft.drawCircle(x, y, 2, CYBER_ACCENT);
+
+    if (i < today) {
+      tft.fillCircle(x, y, 2, CYBER_LIGHT);
+    }
+
+    x += 6;
+  }
+}
+
 // ========= DVD screensaver =========
 
 bool dvdInited = false;
@@ -1036,6 +1099,7 @@ void loop() {
         drawMenu();
       }
       if (encPressed) {
+        // TODO rewrite with a switch OR compare with ENUM values to have it more "generic"
         if (menuIndex == 0) {
           currentMode = MODE_CLOCK;
           initClockStaticUI();
@@ -1055,9 +1119,12 @@ void loop() {
           alarmSelectedField = 0;
           drawAlarmScreen(true);
         } else if (menuIndex == 3) {
+          currentMode = MODE_DAYCOUNTER;
+          dayCounterInited = false;
+        } else if (menuIndex == 4) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } else if (menuIndex == 4) {
+        } else if (menuIndex == 5) {
           currentMode = MODE_GAME;
           gameInited = false;
         }
@@ -1193,6 +1260,23 @@ void loop() {
       if (changed) {
         drawAlarmScreen(false);
         drawAlarmIcon();
+      }
+
+      break;
+    }
+
+    case MODE_DAYCOUNTER: {
+      if (!dayCounterInited) {
+        initDayCounter();
+        drawDayCounter(encPressed, k0Pressed);
+      }
+
+      //drawDayCounter(encPressed, k0Pressed);
+      if (k0Pressed) {
+        dayCounterInited = false;
+        currentMode = MODE_MENU;
+        drawMenu();
+        return;
       }
 
       break;
