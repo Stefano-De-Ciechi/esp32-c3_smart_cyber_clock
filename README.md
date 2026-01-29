@@ -3,7 +3,7 @@
 # IDE Setup:
 Use Arduino IDE (VS Code with Platformio wasn't working due to incompatible esp32 core library version)
 
-1) Install esp32 board manager by Espressif Systems version 3.0.7 (EXACLTY THIS VERSION, otherwise some libraries won't work! And DON'T UPDATE it if you get a prompt when launching Arduino IDE!)
+1) Install esp32 board manager by Espressif Systems
 2) Install these libraries (from Arduino IDE):
   - Adafruit_GFX
   - Adafruit_ST7735
