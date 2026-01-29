@@ -8,7 +8,7 @@
 #include "time.h"
 
 #include "secrets.h"
-#include "wifi_manager.h"
+#include "src/wifi_manager/wifi_manager.h"
 
 // ====== WiFi & Time config ======
 const char* ntpServer = "pool.ntp.org";
