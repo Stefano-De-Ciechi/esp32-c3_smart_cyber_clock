@@ -1,5 +1,12 @@
 # ESP32-C3 Smart Cyber Clock
 
+# Table of Contents:
+1. [IDE Setup](#ide-setup)
+1. [Possible Setup Errors](#possible-setup-errors)
+1. [Project Setup](#project-setup)
+1. [To-Do](#todo)
+1. [Credits](#credits)
+
 # IDE Setup:
 Use Arduino IDE (VS Code with Platformio wasn't working due to incompatible esp32 core library version)
 
@@ -129,7 +136,7 @@ Be sure to create a file named "**secrets.h**" (new tab in the Arduino IDE) and 
 #define AP_PASSWORD "choose a password fo Access Point mode"
 ```
 
-# Todo:
+# To-Do:
 
 - [ ] Integrate Wi-Fi Manager library to setup wifi credentials at runtime
   - [x] rewrite the [AsyncWiFiManagerSimple](https://github.com/marinpopa/AsyncWiFiManagerSimple) library inside my program (and modify HTML etc. using english language) as it is just a couple of functions
