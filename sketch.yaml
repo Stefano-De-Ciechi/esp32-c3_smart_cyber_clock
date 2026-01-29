@@ -1,0 +1,23 @@
+profiles:
+  qtpy_esp32c3:
+    fqbn: esp32:esp32:adafruit_qtpy_esp32c3
+    programmer: esptool
+    platforms:
+      - platform: esp32:esp32 (3.3.5)
+    libraries:
+      - Adafruit GFX Library (1.12.4)
+      - Adafruit ST7735 and ST7789 Library (1.11.0)
+      - Adafruit AHTX0 (2.0.5)
+      - Adafruit BusIO (1.17.4)
+      - Adafruit SH110X (2.1.14)
+      - Adafruit Unified Sensor (1.1.15)
+      - Adafruit seesaw Library (1.7.9)
+      - ENS160 - Adafruit Fork (3.0.1)
+      - ESP Async WebServer (3.9.5)
+      - Async TCP (3.4.10)
+    # port: /dev/ttyACM0
+    port_config:
+      baudrate: 115200
+
+default_profile: qtpy_esp32c3
+default_port: /dev/ttyACM0
