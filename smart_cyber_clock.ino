@@ -8,11 +8,13 @@
 #include "time.h"
 
 #include "secrets.h"
+#include <AsyncWiFiManagerSimple.h>
 
 // ====== WiFi & Time config ======
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec      = 1 * 3600;   // GMT+0
 const int   daylightOffset_sec = 0;
+AsyncWiFiManagerSimple wifiManager;
 
 // ====== Pins ======
 #define TFT_CS   9
@@ -143,6 +145,26 @@ void connectWiFiAndSyncTime() {
     retry++;
   }
 
+  if (WiFi.status() == WL_CONNECTED) {
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    tft.fillScreen(CYBER_BG);
+    tft.setCursor(10, 55);
+    tft.print("assigned ip: ");
+    tft.println(WiFi.localIP());
+    Serial.print("assigned ip: ");
+    Serial.println(WiFi.localIP());
+    tft.print("Syncing time...");
+    delay(800);
+  } else {
+    tft.fillScreen(CYBER_BG);
+    tft.setCursor(10, 55);
+    tft.setTextColor(ST77XX_RED);
+    tft.print("WiFi FAILED!");
+    delay(1000);
+  }
+}
+
+void syncTime() {
   if (WiFi.status() == WL_CONNECTED) {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     tft.fillScreen(CYBER_BG);
@@ -431,7 +453,10 @@ void setup() {
   tft.setRotation(1);
   tft.fillScreen(CYBER_BG);
 
-  connectWiFiAndSyncTime();
+  wifiManager.Setup(AP_NAME, AP_PASSWORD);
+
+  //connectWiFiAndSyncTime();
+  syncTime();
 
   if (!aht.begin()) Serial.println("AHT21 not found");
   if (!ens160.begin()) Serial.println("ENS160 begin FAIL");
@@ -448,13 +473,16 @@ void setup() {
 
 // ========= LOOP =========
 void loop() {
-  static unsigned long lastWifiCheck = 0;
+
+  wifiManager.loop();
+
+  /*static unsigned long lastWifiCheck = 0;
   if (millis() - lastWifiCheck > 10000) {
     lastWifiCheck = millis();
     if (WiFi.status() != WL_CONNECTED) {
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
-  }
+  }*/
 
   int encStep     = readEncoderStep();
   bool encPressed = checkButtonPressed(ENC_BTN_PIN, lastEncBtn);
