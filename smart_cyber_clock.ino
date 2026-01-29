@@ -8,7 +8,7 @@
 #include "time.h"
 
 #include "secrets.h"
-#include <AsyncWiFiManagerSimple.h>
+#include "wifi_manager.h"
 
 // ====== WiFi & Time config ======
 const char* ntpServer = "pool.ntp.org";
@@ -453,7 +453,7 @@ void setup() {
   tft.setRotation(1);
   tft.fillScreen(CYBER_BG);
 
-  wifiManager.Setup(AP_NAME, AP_PASSWORD);
+  wifiManager.Setup(AP_SSID, AP_PASSWORD);
 
   //connectWiFiAndSyncTime();
   syncTime();
