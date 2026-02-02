@@ -1,5 +1,5 @@
-#ifndef WIFI_MANAGER
-#define WIFI_MANAGER
+#ifndef WIFI_MANAGER_HPP
+#define WIFI_MANAGER_HPP
 
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -7,6 +7,8 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include "secrets.h"
+
+#include <Adafruit_ST7735.h>
 
 #define MAX_NETWORKS 4
 #define CONFIG_TIMEOUT 120
@@ -18,12 +20,14 @@ class AsyncWiFiManagerSimple {
 public:
     void Setup();
     void Setup(const char* ap_ssid, const char* ap_pass);
+    void Setup(const char* ap_ssid, const char* ap_pass, Adafruit_ST7735 *tft);
     void loop();
 
 private:
     Preferences preferences;
     AsyncWebServer server{80};
     DNSServer dnsServer;
+    Adafruit_ST7735 *tft = nullptr;
 
     const char* apSSID = AP_SSID;
     const char* apPASS = AP_PASSWORD;

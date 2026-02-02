@@ -1,4 +1,4 @@
-#include "wifi_manager.h"
+#include "wifi_manager.hpp"
 
 // ---------------------------------------------------------
 // HTML PAGE IN PROGMEM
