@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -7,12 +8,42 @@
 #include <ScioSense_ENS160.h>
 #include "time.h"
 
-#include "secrets.h"
+// --- NEW LIBRARIES FOR MULTI-WIFI ---
+#include <WiFiMulti.h>
+#include <Preferences.h>
+
+WiFiMulti wifiMulti;
+Preferences prefs;
+// ------------------------------------
+
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// ====== Weather Settings ======
+String weatherKey = "92ceeffbe3f1b5c8e4b83df88fa92d8c"; // PASTE KEY HERE
+String city       = "Samarate,IT";                     // YOUR CITY (e.g. "London,UK")
+
+// Variables to store data
+float outTemp = 0.0;
+int   outHum  = 0;
+String outDesc = "--";
+unsigned long lastWeatherFetch = 0;
+bool weatherLoaded = false;
+
 
 // ====== WiFi & Time config ======
+
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec      = 1 * 3600;   // GMT+0
+const long  gmtOffset_sec      = 1 * 3600;   // GMT+1
 const int   daylightOffset_sec = 0;
+
+
+
+// ====== Forecast Data ======
+float fTemps[6];    // Temperatures for next 18h
+bool  fRain[6];     // Rain flag for each interval
+int   fHours[6];    // Hour of the day (0-23) for X-axis labels
+bool  forecastLoaded = false;
 
 // ====== Pins ======
 #define TFT_CS   9
@@ -61,13 +92,11 @@ enum UIMode {
   MODE_CLOCK,
   MODE_POMODORO,
   MODE_ALARM,
-  MODE_DAYCOUNTER,
-  MODE_DVD,
-  MODE_GAME
+  MODE_DVD
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 6;       // Monitor, Pomodoro, Alarm, Day Counter, DVD, Game
+const int MENU_ITEMS = 4;       // Monitor, Pomodoro, Alarm, DVD, Game
 
 // ====== Pomodoro ======
 enum PomodoroState {
@@ -154,9 +183,9 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 
 // ========= Alarm icon =========
 void drawAlarmIcon() {
-  if (!alarmEnabled) return;
   int x = 148;
-  tft.fillRect(x - 10, 3, 12, 12, CYBER_BG);
+  tft.fillRect(x - 10, 0, 12, 12, CYBER_BG);
+  if (!alarmEnabled) return;
 
   uint16_t c = CYBER_LIGHT; // cam
   tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
@@ -164,44 +193,247 @@ void drawAlarmIcon() {
   tft.fillCircle(x - 4, 10, 1, c);
 }
 
+
+
+
+// This function runs ONLY if WiFi connection fails and AP mode starts
+void configModeCallback(WiFiManager *myWiFiManager) {
+  tft.fillScreen(CYBER_BG);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setTextSize(1);
+  
+  tft.setCursor(10, 40);
+  tft.println("AutoConfig Mode:");
+  
+  // Line 1
+  tft.setCursor(10, 55);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.println("1. Connect Phone to");
+  
+  // Line 2
+  tft.setCursor(10, tft.getCursorY()); 
+  tft.setTextColor(CYBER_ACCENT);
+  tft.println("   WIFI: CyberClock");
+  
+  // Line 3
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, tft.getCursorY()); 
+  tft.println("2. Wait for Pop-up");
+  
+  // Line 4
+  tft.setCursor(10, tft.getCursorY());
+  tft.println("   to input Pass");
+}
+
+
+// ========== HELPERS ==============
+
+
+// Load up to 3 saved networks from memory into WiFiMulti
+void loadWiFiList() {
+  prefs.begin("wifi-creds", true); // Open in read-only mode
+  
+  // Try to load 3 slots
+  for (int i = 0; i < 3; i++) {
+    String keySsid = "ssid" + String(i);
+    String keyPass = "pass" + String(i);
+    
+    String s = prefs.getString(keySsid.c_str(), "");
+    String p = prefs.getString(keyPass.c_str(), "");
+    
+    if (s.length() > 0) {
+      Serial.print("Loaded Saved WiFi: "); Serial.println(s);
+      // conversion to char array needed for addAP
+      char sArr[33]; s.toCharArray(sArr, 33);
+      char pArr[65]; p.toCharArray(pArr, 65);
+      wifiMulti.addAP(sArr, pArr);
+    }
+  }
+  prefs.end();
+}
+
+// Save the CURRENT connected network to the list (Shift old ones out)
+void saveCurrentNetwork() {
+  String currentSSID = WiFi.SSID();
+  String currentPass = WiFi.psk();
+  
+  if (currentSSID.length() == 0) return;
+
+  prefs.begin("wifi-creds", false); // Open in read/write mode
+
+  // 1. Check if it already exists (don't save duplicate)
+  for (int i = 0; i < 3; i++) {
+    String s = prefs.getString(("ssid" + String(i)).c_str(), "");
+    if (s == currentSSID) {
+      prefs.end();
+      return; // Already saved
+    }
+  }
+
+  // 2. Shift existing down (Slot 1->2, Slot 0->1) to make room at Slot 0
+  String s1 = prefs.getString("ssid1", "");
+  String p1 = prefs.getString("pass1", "");
+  String s0 = prefs.getString("ssid0", "");
+  String p0 = prefs.getString("pass0", "");
+
+  // Move 1 to 2
+  if (s1.length() > 0) {
+    prefs.putString("ssid2", s1);
+    prefs.putString("pass2", p1);
+  }
+  // Move 0 to 1
+  if (s0.length() > 0) {
+    prefs.putString("ssid1", s0);
+    prefs.putString("pass1", p0);
+  }
+
+  // 3. Save NEW network to Slot 0 (The highest priority)
+  prefs.putString("ssid0", currentSSID);
+  prefs.putString("pass0", currentPass);
+  
+  Serial.println("New Network Saved to Slot 0");
+  prefs.end();
+}
+
+
+
+
+
+
+
 // ========= WiFi & Time =========
 void connectWiFiAndSyncTime() {
   tft.fillScreen(CYBER_BG);
   tft.setTextColor(CYBER_LIGHT);
   tft.setTextSize(1);
+  
+  // --- STEP 1: Try connecting to stored networks (Multi) ---
   tft.setCursor(10, 55);
-  tft.print("Connecting to WiFi: ");
-  tft.print(WIFI_SSID);
-  Serial.print("Connecting to wifi: ");
-  Serial.println(WIFI_SSID);
-  // TODO optimise this by calling WiFi.disconnect() to close the connection and power off the module ?!?
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  uint8_t retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 20) {
-    delay(300);
+  tft.print("Checking Memory...");
+  
+  WiFi.mode(WIFI_STA);
+  loadWiFiList(); // Load the 3 slots
+  
+  // Try to connect for ~5-6 seconds
+  bool connected = false;
+  // We loop a few times; wifiMulti.run() picks the best available network
+  for (int i = 0; i < 6; i++) { 
+    if (wifiMulti.run() == WL_CONNECTED) {
+      connected = true;
+      break;
+    }
     tft.print(".");
-    retry++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    tft.fillScreen(CYBER_BG);
-    tft.setCursor(10, 55);
-    tft.print("assigned ip: ");
-    tft.println(WiFi.localIP());
-    Serial.print("assigned ip: ");
-    Serial.println(WiFi.localIP());
-    tft.print("Syncing time...");
-    delay(800);
-  } else {
-    tft.fillScreen(CYBER_BG);
-    tft.setCursor(10, 55);
-    tft.setTextColor(ST77XX_RED);
-    tft.print("WiFi FAILED!");
     delay(1000);
   }
+
+  // --- STEP 2: If Multi failed, start WiFiManager (Pop-up) ---
+  if (!connected) {
+    tft.fillScreen(CYBER_BG);
+    tft.setCursor(10, 55);
+    tft.setTextColor(CYBER_LIGHT);
+    tft.print("No known WiFi found");
+    delay(1000);
+
+    WiFiManager wm;
+    // Inject your Custom CSS here (copy your working CSS string from before)
+   const char* customCSS = 
+   "<style>"
+     "body {"
+      "background-color: #000000;"
+      "color: #FFFFFF;"
+      "font-family: 'Courier New', Courier, monospace;" // Retro font
+    "}"
+    // --- FIX 1: HIDE THE EXTRA WHITE TEXT ---
+    "h3 { display: none !important; }"
+    "img {"
+      "background-color: #00FFFF;"  /* Cyan background */
+      "padding: 2px;"                /* Little bit of spacing */
+      "vertical-align: middle;"      /* Aligns icon with text */
+      "border: 1px solid #00FFFF;"   /* Optional: Green border for detail */
+    "}"
+
+  /* --- NEW: FIX FOR INVISIBLE WIFI NAMES --- */
+    "a {"
+      "color: #00FFFF;"       /* CYAN color for Wi-Fi Network names */
+      "text-decoration: none;"
+    "}"
+    "a:hover {"
+      "color: #FF00FF;"       /* PINK when you touch/hover them */
+    "}"
+    /* ---------------------------------------- */
+
+    "h1 {"
+      "color: #00FFFF;"       // Cyan Header
+      "text-shadow: 2px 2px #FF00FF;" // Pink shadow for 'glitch' effect
+    "}"
+    "button {"
+      "background-color: #000000;"
+      "color: #00FFFF;"
+      "border: 2px solid #00FFFF;"
+      "border-radius: 0px;"   // Sharp corners
+      "padding: 10px;"
+      "font-weight: bold;"
+      "text-transform: uppercase;"
+    "}"
+    "button:hover {"
+      "background-color: #00FFFF;"
+      "color: #000000;"
+    "}"
+    "input {"
+      "background-color: #1a1a1a;"
+      "color: #FFFFFF;"
+      "border: 1px solid #00FFFF;"
+      "border-radius: 0px;"
+      "padding: 5px;"
+    "}"
+    "div, p, form { text-align: left; }" // Center align everything
+    
+    // Add this to hide the "No AP set" status box at the bottom
+    ".mw { display: none; }"
+    
+    // ... end of style ...
+    "</style>";
+  
+    wm.setCustomHeadElement(customCSS);
+    wm.setTitle("CYBER CLOCK");
+    wm.setAPCallback(configModeCallback);
+    
+    // Start Pop-up
+    bool res = wm.autoConnect("Cyber Clock");
+
+    if (!res) {
+      tft.fillScreen(CYBER_BG);
+      tft.setCursor(10, 55);
+      tft.setTextColor(ST77XX_RED);
+      tft.print("WiFi FAILED!");
+      delay(3000);
+      ESP.restart();
+    } else {
+      // SUCCESS via Pop-up: Save this new network to our list
+      saveCurrentNetwork();
+    }
+  }
+
+  // --- STEP 3: Connected! Sync Time ---
+  tft.fillScreen(CYBER_BG);
+  tft.setCursor(10, 55);
+  tft.setTextColor(CYBER_GREEN);
+  tft.print("WiFi Connected!");
+  tft.setCursor(10, 70);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.print("SSID: ");
+  tft.print(WiFi.SSID()); // Show which one we connected to
+
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  
+  struct tm timeinfo;
+  int retry = 0;
+  while (!getLocalTime(&timeinfo) && retry < 10) {
+    delay(500);
+    retry++;
+  }
 }
+
 
 String getTimeStr(char type) {
   struct tm timeinfo;
@@ -410,9 +642,7 @@ void drawMenu() {
     "Monitor",
     "Pomodoro",
     "Alarm",
-    "Day Counter",
-    "DVD",
-    "Space Attack"
+    "DVD"
   };
 
   for (int i = 0; i < MENU_ITEMS; i++) {
@@ -629,283 +859,6 @@ void updateAlertStateAndLED() {
   }
 }
 
-// ========= GAME: Space Attack (simple TFT version) =========
-
-// court layout
-const int COURT_X = 8;
-const int COURT_Y = 16;
-const int COURT_W = 144;
-const int COURT_H = 96;
-
-const int PADDLE_W = 18;
-const int PADDLE_H = 4;
-const int PADDLE_Y = COURT_Y + COURT_H - 8;
-
-const int ALIEN_ROWS = 3;
-const int ALIEN_COLS = 8;
-bool alienAlive[ALIEN_ROWS][ALIEN_COLS];
-int  alienOffsetX = 0;   // pixel offset
-int  alienDir     = 1;   // 1:right, -1:left
-unsigned long lastAlienMoveMs = 0;
-unsigned long alienMoveInterval = 250;
-
-bool  bulletActive = false;
-int   bulletX = 0, bulletY = 0;
-unsigned long lastBulletMoveMs = 0;
-unsigned long bulletInterval = 25;
-
-int  playerX = COURT_X + (COURT_W - PADDLE_W) / 2;
-int  gameScore = 0;
-bool gameOver  = false;
-bool gameInited = false;
-
-void initGame() {
-  gameScore = 0;
-  gameOver  = false;
-  gameInited = true;
-
-  // background
-  tft.fillScreen(CYBER_BG);
-  tft.drawRect(COURT_X, COURT_Y, COURT_W, COURT_H, CYBER_ACCENT);
-
-  // aliens
-  for (int r = 0; r < ALIEN_ROWS; r++) {
-    for (int c = 0; c < ALIEN_COLS; c++) {
-      alienAlive[r][c] = true;
-    }
-  }
-  alienOffsetX = 0;
-  alienDir     = 1;
-
-  bulletActive = false;
-
-  // title
-  tft.setTextSize(1);
-  tft.setTextColor(CYBER_LIGHT, CYBER_BG);
-  tft.setCursor(10, 2);
-  tft.print("SPACE ATTACK");
-
-  // score
-  tft.setCursor(110, 2);
-  tft.print("0");
-
-  drawAlarmIcon();
-}
-
-void drawScore() {
-  tft.fillRect(100, 0, 60, 10, CYBER_BG);
-  tft.setCursor(110, 2);
-  tft.setTextSize(1);
-  tft.setTextColor(CYBER_GREEN, CYBER_BG);
-  tft.print(gameScore);
-}
-
-void drawPlayer() {
-  tft.fillRect(COURT_X + 1, PADDLE_Y, COURT_W - 2, PADDLE_H, CYBER_BG);
-  tft.fillRect(playerX, PADDLE_Y, PADDLE_W, PADDLE_H, CYBER_ACCENT);
-}
-
-void drawAliens() {
-  // clear area
-  tft.fillRect(COURT_X + 1, COURT_Y + 1, COURT_W - 2, COURT_H - 16, CYBER_BG);
-
-  int cellW = COURT_W / ALIEN_COLS;
-  int cellH = 12;
-
-  for (int r = 0; r < ALIEN_ROWS; r++) {
-    for (int c = 0; c < ALIEN_COLS; c++) {
-      if (!alienAlive[r][c]) continue;
-      int x = COURT_X + 4 + alienOffsetX + c * cellW;
-      int y = COURT_Y + 4 + r * cellH;
-      tft.fillRect(x, y, 8, 6, CYBER_GREEN);
-      tft.drawRect(x, y, 8, 6, CYBER_DARK);
-    }
-  }
-}
-
-void drawBullet() {
-  // clear old bullet track
-  tft.fillRect(COURT_X + 1, COURT_Y + 1, COURT_W - 2, COURT_H - 2, CYBER_BG);
-  drawAliens();
-  drawPlayer();
-
-  if (bulletActive) {
-    tft.drawFastVLine(bulletX, bulletY, 4, CYBER_PINK);
-  }
-}
-
-void updateGameLogic(int encStep, bool firePressed, bool backPressed) {
-  if (backPressed) {
-    gameInited = false;
-    currentMode = MODE_MENU;
-    drawMenu();
-    return;
-  }
-
-  if (gameOver) {
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-    tft.setCursor(35, 60);
-    tft.print("GAME OVER");
-    if (firePressed || encStep != 0) {
-      initGame();
-      drawAliens();
-      drawPlayer();
-    }
-    return;
-  }
-
-  // move player by encoder
-  if (encStep != 0) {
-    playerX += encStep * 4;  // nhanh tay hơn
-    if (playerX < COURT_X + 2) playerX = COURT_X + 2;
-    if (playerX + PADDLE_W > COURT_X + COURT_W - 2)
-      playerX = COURT_X + COURT_W - 2 - PADDLE_W;
-    drawPlayer();
-  }
-
-  // fire
-  if (firePressed && !bulletActive) {
-    bulletActive = true;
-    bulletX = playerX + PADDLE_W / 2;
-    bulletY = PADDLE_Y - 2;
-    tone(BUZZ_PIN, 1800, 40);
-  }
-
-  unsigned long now = millis();
-
-  // move aliens
-  if (now - lastAlienMoveMs > alienMoveInterval) {
-    lastAlienMoveMs = now;
-    alienOffsetX += alienDir * 4;
-
-    int leftMost = INT16_MAX;
-    int rightMost = INT16_MIN;
-
-    int cellW = COURT_W / ALIEN_COLS;
-    for (int c = 0; c < ALIEN_COLS; c++) {
-      for (int r = 0; r < ALIEN_ROWS; r++) {
-        if (!alienAlive[r][c]) continue;
-        int x = alienOffsetX + c * cellW;
-        if (x < leftMost) leftMost = x;
-        if (x > rightMost) rightMost = x;
-      }
-    }
-
-    if (leftMost + 4 < 0)  alienDir = 1;
-    if (rightMost + 12 > COURT_W) alienDir = -1;
-
-    drawAliens();
-  }
-
-  // move bullet
-  if (bulletActive && now - lastBulletMoveMs > bulletInterval) {
-    lastBulletMoveMs = now;
-    bulletY -= 4;
-    if (bulletY < COURT_Y + 2) {
-      bulletActive = false;
-    } else {
-      // check collision
-      int cellW = COURT_W / ALIEN_COLS;
-      int cellH = 12;
-
-      for (int r = 0; r < ALIEN_ROWS; r++) {
-        for (int c = 0; c < ALIEN_COLS; c++) {
-          if (!alienAlive[r][c]) continue;
-          int alienX = COURT_X + 4 + alienOffsetX + c * cellW;
-          int alienY = COURT_Y + 4 + r * cellH;
-          if (bulletX >= alienX && bulletX <= alienX + 8 &&
-              bulletY >= alienY && bulletY <= alienY + 6) {
-            alienAlive[r][c] = false;
-            bulletActive = false;
-            gameScore += 10;
-            tone(BUZZ_PIN, 2200, 60);
-            drawScore();
-          }
-        }
-      }
-    }
-    drawBullet();
-  }
-
-  // check win / lose
-  bool anyAlive = false;
-  for (int r = 0; r < ALIEN_ROWS; r++) {
-    for (int c = 0; c < ALIEN_COLS; c++) {
-      if (alienAlive[r][c]) {
-        anyAlive = true;
-        int cellH = 12;
-        int alienY = COURT_Y + 4 + r * cellH;
-        if (alienY + 6 >= PADDLE_Y) {
-          gameOver = true;
-        }
-      }
-    }
-  }
-  if (!anyAlive) {
-    gameOver = true;
-  }
-}
-
-// ========= Day Counter =============
-
-bool dayCounterInited = false;
-int screenWidth = 0, screenHeigth = 0;
-
-void initDayCounter() {
-  dayCounterInited = true;
-  tft.fillScreen(CYBER_BG);
-
-  tft.drawRect(0, 0, tft.width() - 1, tft.height() - 1, CYBER_LIGHT);
-  Serial.print("w: ");
-  Serial.print(tft.width());
-  Serial.print("h: ");
-  Serial.println(tft.height());
-}
-
-void drawDayCounter(bool encPressed, bool backPressed) {
-  (void)encPressed;
-
-  /*if (backPressed) {
-    dayCounterInited = false;
-    currentMode = MODE_MENU;
-    drawMenu();
-    return;
-  }*/
-
-  Serial.println("counting");
-
-  tft.setCursor(8, 4);
-  tft.setTextColor(CYBER_LIGHT);
-  tft.print("DAY COUNTER");
-  drawAlarmIcon();
-
-  // draw a circle for every day of the year (365 or 366)
-  /*for (int x = 0; x < 31; x++) {
-    for (int y = 0; y < 12; y++) {
-      tft.drawCircle(x + 8, y + 8, 3, CYBER_ACCENT);
-    }
-  }*/
-
-  int x = 5;
-  int y = 15;
-  int today = 24;
-  for (int i = 0; i < 365; i++) {
-
-    if (x >= tft.width() - 1) {
-      x = 5;
-      y += 6;
-    }
-
-    tft.drawCircle(x, y, 2, CYBER_ACCENT);
-
-    if (i < today) {
-      tft.fillCircle(x, y, 2, CYBER_LIGHT);
-    }
-
-    x += 6;
-  }
-}
 
 // ========= DVD screensaver =========
 
@@ -1038,6 +991,227 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
   drawDvdLogo(dvdX, dvdY, dvdColors[dvdColorIndex]);
 }
 
+//========= WHEATER STUF ===========
+void fetchWeather() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClient client;
+  HTTPClient http;
+  
+  // We still fetch the forecast
+  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
+  
+  http.begin(client, url);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    // Filter to save memory
+    JsonDocument filter;
+    filter["list"][0]["dt"] = true;
+    filter["list"][0]["main"]["temp"] = true;
+    filter["list"][0]["weather"][0]["main"] = true;
+    filter["city"]["timezone"] = true;
+
+    JsonDocument doc; 
+    DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+
+    if (!error) {
+      long timezone = doc["city"]["timezone"];
+      
+      // --- POINT 0: CURRENT WEATHER (NOW) ---
+      // We use the global 'outTemp' we fetched earlier (or use 1st forecast slot as proxy if needed)
+      // Note: Best practice is to assume fetchWeather updates outTemp first. 
+      // If outTemp is 0 (first run), we'll trust the first forecast slot.
+      if (outTemp == 0) outTemp = doc["list"][0]["main"]["temp"];
+      
+      fTemps[0] = outTemp;
+      fRain[0]  = (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0 || outDesc.indexOf("Thunder") >= 0);
+      
+      // Get current local hour
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo)) {
+        fHours[0] = timeinfo.tm_hour;
+      } else {
+        fHours[0] = 0; 
+      }
+
+      // --- POINTS 1-5: FORECAST (Next 15 hours) ---
+      for(int i=0; i<5; i++) {
+        fTemps[i+1] = doc["list"][i]["main"]["temp"];
+        
+        const char* w = doc["list"][i]["weather"][0]["main"];
+        String cond = String(w);
+        fRain[i+1] = (cond.indexOf("Rain") >= 0 || cond.indexOf("Drizzle") >= 0 || cond.indexOf("Thunder") >= 0);
+
+        // Calculate Hour
+        unsigned long dt = doc["list"][i]["dt"];
+        time_t rawTime = (time_t)(dt + timezone); 
+        struct tm* ti = gmtime(&rawTime);   
+        fHours[i+1] = ti->tm_hour;
+      }
+      
+      weatherLoaded = true;
+      forecastLoaded = true;
+      Serial.println("Forecast Updated (Start=Now).");
+    }
+  }
+  http.end();
+}
+
+
+
+void drawWeatherScreen() {
+  tft.fillScreen(CYBER_BG);
+  
+  // Header
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 5);
+  tft.print("METEO for "); 
+  tft.print(city);
+  
+  if (!weatherLoaded) {
+    tft.setCursor(20, 60);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("Loading...");
+    return;
+  }
+
+  // Draw Big Temperature
+  tft.setTextSize(3);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.setCursor(30, 40);
+  tft.print(outTemp, 1);
+  tft.setTextSize(1);
+  tft.print(" C");
+
+  // Draw Condition (Rain/Clear/etc)
+  tft.setTextSize(2);
+  tft.setTextColor(CYBER_GREEN);
+  int descW = outDesc.length() * 12;
+  tft.setCursor((160 - descW) / 2, 80);
+  tft.print(outDesc);
+
+  // Draw Humidity
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(40, 110);
+  tft.print("Humidity: ");
+  tft.print(outHum);
+  tft.print("%");
+  
+  drawAlarmIcon();
+}
+
+
+
+void drawGraphScreen() {
+  tft.fillScreen(CYBER_BG);
+
+  // Title
+  tft.setTextSize(1);
+  //tft.setTextColor(CYBER_LIGHT);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 4);
+  //tft.print("FORECAST (Now -> +15h)");
+  tft.print("Forecast Now -> +15h");
+
+  if (!forecastLoaded) {
+    tft.setCursor(20, 60);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.print("Loading Data...");
+    return;
+  }
+
+  // --- 1. Find Min/Max & Their Indices ---
+  float minT = 100, maxT = -100;
+  int minIdx = 0, maxIdx = 0;
+
+  for(int i=0; i<6; i++) {
+    if(fTemps[i] < minT) { minT = fTemps[i]; minIdx = i; }
+    if(fTemps[i] > maxT) { maxT = fTemps[i]; maxIdx = i; }
+  }
+  
+  // Padding
+  float rangeMin = minT - 1.0;
+  float rangeMax = maxT + 1.0;
+  if (rangeMax - rangeMin < 2.0) rangeMax = rangeMin + 2.0;
+
+  // --- 2. Graph Dimensions (TALLER) ---
+  int graphX = 16;       // Left margin
+  int graphY = 25;       // Top margin
+  int graphW = 128;      // Width
+  int graphH = 75;       // INCREASED HEIGHT (was 60)
+  int graphBot = graphY + graphH;
+
+  // Draw Grid Lines (Horizontal)
+  tft.drawFastHLine(graphX - 4, graphY, graphW + 8, CYBER_DARK); // Top
+  tft.drawFastHLine(graphX - 4, graphBot, graphW + 8, CYBER_DARK); // Bottom
+
+  // --- 3. Draw "NOW" Line (Red Dotted) at Index 0 ---
+  for (int y = graphY; y < graphBot; y += 4) {
+    tft.drawPixel(graphX, y, ST77XX_RED);
+    tft.drawPixel(graphX, y+1, ST77XX_RED);
+  }
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_RED);
+  tft.setCursor(graphX - 6, graphY - 10);
+  //tft.print("NOW");
+
+  // --- 4. Draw Plot ---
+  int stepX = graphW / 5; // 5 segments between 6 points
+  
+  // Store coordinates to draw labels later
+  int ptX[6];
+  int ptY[6];
+
+  for (int i = 0; i < 6; i++) {
+    // Calculate Coordinates
+    ptX[i] = graphX + i * stepX;
+    ptY[i] = map(fTemps[i] * 10, rangeMin * 10, rangeMax * 10, graphBot, graphY);
+    
+    // Draw Line to next point
+    if (i < 5) {
+      int nextY = map(fTemps[i+1] * 10, rangeMin * 10, rangeMax * 10, graphBot, graphY);
+      int nextX = graphX + (i + 1) * stepX;
+      
+      uint16_t color = CYBER_GREEN;
+      if (fRain[i] || fRain[i+1]) color = CYBER_BLUE; 
+
+      tft.drawLine(ptX[i], ptY[i], nextX, nextY, color);
+      tft.drawLine(ptX[i], ptY[i]+1, nextX, nextY+1, color); // Thicker line
+    }
+
+    // Draw Circle Point
+    tft.fillCircle(ptX[i], ptY[i], 2, ST77XX_WHITE);
+
+    // Draw Hour Label (X-axis)
+    tft.setTextColor(CYBER_LIGHT);
+    // Adjust X to center the number
+    int labelOffset = (fHours[i] < 10) ? -3 : -6; 
+    tft.setCursor(ptX[i] + labelOffset, graphBot + 6);
+    tft.print(fHours[i]);
+  }
+
+  // --- 5. Draw Dynamic Min/Max Labels ---
+  // Max Label (Above the point)
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(ptX[maxIdx] - 6, ptY[maxIdx] - 12);
+  tft.print((int)maxT);
+
+  // Min Label (Below the point)
+  tft.setTextColor(ST77XX_WHITE); // Coldest color
+  tft.setCursor(ptX[minIdx] - 6, ptY[minIdx] + 8);
+  tft.print((int)minT);
+}
+
+//=========
+
+
+
+
 // ========= SETUP =========
 void setup() {
   Serial.begin(115200);
@@ -1075,13 +1249,6 @@ void setup() {
 
 // ========= LOOP =========
 void loop() {
-  static unsigned long lastWifiCheck = 0;
-  if (millis() - lastWifiCheck > 10000) {
-    lastWifiCheck = millis();
-    if (WiFi.status() != WL_CONNECTED) {
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    }
-  }
 
   int encStep     = readEncoderStep();
   bool encPressed = checkButtonPressed(ENC_BTN_PIN, lastEncBtn);
@@ -1099,7 +1266,6 @@ void loop() {
         drawMenu();
       }
       if (encPressed) {
-        // TODO rewrite with a switch OR compare with ENUM values to have it more "generic"
         if (menuIndex == 0) {
           currentMode = MODE_CLOCK;
           initClockStaticUI();
@@ -1119,34 +1285,93 @@ void loop() {
           alarmSelectedField = 0;
           drawAlarmScreen(true);
         } else if (menuIndex == 3) {
-          currentMode = MODE_DAYCOUNTER;
-          dayCounterInited = false;
-        } else if (menuIndex == 4) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } else if (menuIndex == 5) {
-          currentMode = MODE_GAME;
-          gameInited = false;
-        }
+        } 
       }
       break;
     }
-
+ 
     case MODE_CLOCK: {
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo)) {
-        int sec = timeinfo.tm_sec;
-        if (sec != prevSecond) {
-          prevSecond = sec;
+      // 0 = Monitor, 1 = Weather, 2 = Forecast Graph
+      static int clockPage = 0; 
+      static int prevClockPage = -1;
+
+      // 1. Handle Encoder
+      if (encStep != 0) {
+        clockPage += encStep;
+        
+        // --- Limit Logic (0 to 2) ---
+        if (clockPage < 0) clockPage = 0; 
+        if (clockPage > 2) clockPage = 2; 
+        // Note: You can make it wrap-around (0->2) if you prefer circular menu
+      }
+
+      // 2. Page Change Logic
+      if (clockPage != prevClockPage) {
+        prevClockPage = clockPage;
+        tft.fillScreen(CYBER_BG);
+        
+        if (clockPage == 0) {
+          // --- Page 0: Monitor ---
+          initClockStaticUI();
+          prevTimeStr = ""; 
+          updateEnvSensors(true); 
           drawClockTime(getTimeStr('H'), getTimeStr('M'), getTimeStr('S'));
-          if (sec % 5 == 0) {
-            updateEnvSensors(true);
-            drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
+          drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
+        } 
+        else if (clockPage == 1) {
+          // --- Page 1: Weather ---
+          if (!weatherLoaded || millis() - lastWeatherFetch > 900000) {
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching...");
+             fetchWeather();
+             lastWeatherFetch = millis();
+             tft.fillScreen(CYBER_BG); 
           }
+          drawWeatherScreen();
+        }
+        else {
+          // --- Page 2: Forecast Graph ---
+          if (!forecastLoaded) { 
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching...");
+             fetchWeather(); 
+             lastWeatherFetch = millis();
+          }
+          drawGraphScreen();
         }
       }
+
+      // 3. Update Loop for specific page
+      if (clockPage == 0) {
+        // Monitor Logic
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo)) {
+          int sec = timeinfo.tm_sec;
+          if (sec != prevSecond) {
+            prevSecond = sec;
+            drawClockTime(getTimeStr('H'), getTimeStr('M'), getTimeStr('S'));
+            if (sec % 5 == 0) {
+              updateEnvSensors(true);
+              drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
+            }
+          }
+        }
+      } 
+      else {
+        // Weather & Graph Auto-Refresh (15 mins)
+        if (millis() - lastWeatherFetch > 900000) { 
+          fetchWeather();
+          lastWeatherFetch = millis();
+          if (clockPage == 1) drawWeatherScreen();
+          if (clockPage == 2) drawGraphScreen();
+        }
+      }
+
+      // 4. Exit
       if (k0Pressed) {
         currentMode = MODE_MENU;
+        clockPage = 0; 
+        prevClockPage = -1; 
         drawMenu();
       }
       break;
@@ -1265,23 +1490,6 @@ void loop() {
       break;
     }
 
-    case MODE_DAYCOUNTER: {
-      if (!dayCounterInited) {
-        initDayCounter();
-        drawDayCounter(encPressed, k0Pressed);
-      }
-
-      //drawDayCounter(encPressed, k0Pressed);
-      if (k0Pressed) {
-        dayCounterInited = false;
-        currentMode = MODE_MENU;
-        drawMenu();
-        return;
-      }
-
-      break;
-    }
-
     case MODE_DVD: {
       if (!dvdInited) {
         initDvd();
@@ -1290,14 +1498,5 @@ void loop() {
       break;
     }
 
-    case MODE_GAME: {
-      if (!gameInited) {
-        initGame();
-        drawAliens();
-        drawPlayer();
-      }
-      updateGameLogic(encStep, encPressed, k0Pressed);
-      break;
-    }
   }
 }
