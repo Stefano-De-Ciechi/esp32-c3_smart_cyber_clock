@@ -705,33 +705,32 @@ void drawMenu() {
 void drawPomodoroScreen(bool fullRedraw) {
   if (fullRedraw) tft.fillScreen(CYBER_BG);
 
-  // 1. TOP HEADER
+  // 1. TOP HEADER (Cleared to prevent overlap)
+  // Clear the header area first
+  tft.fillRect(0, 0, 160, 14, CYBER_BG);
+  
   tft.setTextSize(1);
   tft.setCursor(6, 4);
-
   if (pomoPhase == PHASE_WORK) {
     tft.setTextColor(CYBER_ACCENT, CYBER_BG);
-    tft.print("Work");
+    tft.print("WORK SESSION");
   } else {
     tft.setTextColor(CYBER_GREEN, CYBER_BG);
-    tft.print("Break");
+    tft.print("BREAK TIME");
   }
 
   // "PAUSED" Indicator (Top Right)
   tft.setCursor(100, 4);
-
   if (pomoState == STATE_PAUSED) {
     tft.setTextColor(ST77XX_ORANGE, CYBER_BG);
     tft.print("PAUSED");
   } else if (pomoState == STATE_READY) {
     tft.setTextColor(ST77XX_WHITE, CYBER_BG);
     tft.print("READY");
-  } else {
-    tft.fillRect(100, 4, 60, 8, CYBER_BG); // Clear text
-  }
+  } 
 
   // 2. CENTER TIMER (Big Text)
-  // Format MM:SS
+  // Use a fixed width background or clear the specific area
   int m = pomoCurrentSec / 60;
   int s = pomoCurrentSec % 60;
   char timeBuf[10];
@@ -740,16 +739,20 @@ void drawPomodoroScreen(bool fullRedraw) {
   tft.setTextSize(3);
   int16_t x1, y1; 
   uint16_t w, h;
-  tft.getTextBounds(timeBuf, 0, 0, &x1, &y1, &w, &h);
+  tft.getTextBounds("00:00", 0, 0, &x1, &y1, &w, &h); // Measure max width
+  
   int textX = (160 - w) / 2;
   int textY = 45;
+
+  // Clear the timer area to prevent ghosting zeros
+  // We use the measured width 'w' and height 'h'
+  tft.fillRect(textX - 4, textY - 4, w + 8, h + 8, CYBER_BG);
 
   tft.setCursor(textX, textY);
   tft.setTextColor(ST77XX_WHITE, CYBER_BG);
   tft.print(timeBuf);
 
   // 3. PROGRESS BAR
-  // Calculate fill percentage
   long totalDuration = (pomoPhase == PHASE_WORK) ? workDurationSec : breakDurationSec;
   float progress = 1.0 - ((float)pomoCurrentSec / totalDuration);
   if (progress < 0) progress = 0;
@@ -760,26 +763,21 @@ void drawPomodoroScreen(bool fullRedraw) {
   int barW = 140;
   int barH = 6;
   
-  // Draw Empty Frame
-  tft.drawRect(barX-1, barY-1, barW+2, barH+2, CYBER_DARK);
+  // Only draw the frame once or if full redraw
+  if (fullRedraw) tft.drawRect(barX-1, barY-1, barW+2, barH+2, CYBER_DARK);
   
-  // Fill Bar
   int fillW = (int)(barW * progress);
   uint16_t barColor = (pomoPhase == PHASE_WORK) ? CYBER_PINK : CYBER_GREEN;
   
-  // Optimize: Only redraw the "new" part or full if requested
-  // For simplicity, we fill the active part and clear the rest
   tft.fillRect(barX, barY, fillW, barH, barColor);
   tft.fillRect(barX + fillW, barY, barW - fillW, barH, CYBER_BG);
 
-  // 4. BOTTOM FOOTER
-  // Shows "Break: 05:00" and "Step: 1/4"
+  // 4. BOTTOM FOOTER (Cleared to prevent overlap)
+  tft.fillRect(0, 108, 160, 20, CYBER_BG); // <--- Fix for "Break: 03:000"
+
   tft.setTextSize(1);
   tft.setTextColor(CYBER_LIGHT, CYBER_BG);
   
-  // Draw Break Info (or Work info if we are in break?)
-  // User asked for "Break timer next to it". 
-  // We will show the SETTING value.
   char footerBuf[30];
   long otherVal = (pomoPhase == PHASE_WORK) ? breakDurationSec : workDurationSec;
   const char* label = (pomoPhase == PHASE_WORK) ? "Break" : "Work";
@@ -789,7 +787,6 @@ void drawPomodoroScreen(bool fullRedraw) {
   tft.setCursor(6, 110);
   tft.print(footerBuf);
 
-  // Step Counter
   tft.setCursor(100, 110);
   tft.setTextColor(ST77XX_WHITE, CYBER_BG);
   tft.printf("Step: %d/%d", pomoStep, POMO_MAX_STEPS);
@@ -1784,39 +1781,74 @@ void loop() {
       bool needDraw = false;
       unsigned long now = millis();
 
-      // --- 1. HANDLE ENCODER (Adjust Time) ---
-      // We only allow changing time when READY or PAUSED
-      if (pomoState != STATE_RUNNING && encStep != 0) {
-         long adjustment = encStep * 30; // 30 seconds steps
+      // --- 1. HANDLE BUTTON (Click vs Long Press) ---
+      // We implement custom button logic here to handle the 3s HOLD
+      static unsigned long btnDownStart = 0;
+      static bool longPressHandled = false;
+      
+      // Read pin directly (ignoring the global encPressed for this mode)
+      bool btnState = digitalRead(ENC_BTN_PIN); 
+
+      if (btnState == LOW) { // Button Pressed
+        if (btnDownStart == 0) btnDownStart = now; // Just pressed
+        
+        // CHECK FOR LONG PRESS RESET (> 3000ms)
+        if (!longPressHandled && (now - btnDownStart > 3000)) {
+           // == RESET ACTION ==
+           pomoState = STATE_READY;
+           pomoPhase = PHASE_WORK;
+           pomoStep = 1;
+           pomoCurrentSec = workDurationSec;
+           pomoAlarmActive = false;
+           longPressHandled = true; // Prevent re-triggering
+           
+           // Visual/Audio Feedback
+           tft.fillScreen(CYBER_BG);
+           tft.setCursor(50, 60);
+           tft.setTextColor(ST77XX_RED);
+           tft.print("RESET!");
+           tone(BUZZ_PIN, 1000, 500);
+           delay(1000);
+           drawPomodoroScreen(true);
+        }
+      } 
+      else { // Button Released (HIGH)
+        if (btnDownStart != 0) {
+           // If we didn't handle a long press, it's a CLICK
+           if (!longPressHandled) {
+              // == START/PAUSE ACTION ==
+              if (pomoState == STATE_RUNNING) {
+                pomoState = STATE_PAUSED;
+              } else {
+                if (pomoState == STATE_READY) lastPomoTick = millis();
+                pomoState = STATE_RUNNING;
+              }
+              needDraw = true;
+           }
+           // Reset flags
+           btnDownStart = 0;
+           longPressHandled = false;
+        }
+      }
+
+      // --- 2. HANDLE ENCODER (Adjust Time) ---
+      // FIX: Only allow adjustment if STATE_READY (not PAUSED)
+      if (pomoState == STATE_READY && encStep != 0) {
+         long adjustment = encStep * 30; 
          
          if (pomoPhase == PHASE_WORK) {
             workDurationSec += adjustment;
-            if (workDurationSec < 60) workDurationSec = 60; // Min 1 min
-            if (workDurationSec > 3600) workDurationSec = 3600; // Max 60 min
-            // Update current timer only if we haven't started yet
-            if (pomoState == STATE_READY) pomoCurrentSec = workDurationSec;
+            if (workDurationSec < 60) workDurationSec = 60; 
+            if (workDurationSec > 3600) workDurationSec = 3600; 
+            pomoCurrentSec = workDurationSec; // Update immediately
          } 
          else {
             breakDurationSec += adjustment;
             if (breakDurationSec < 30) breakDurationSec = 30;
             if (breakDurationSec > 1800) breakDurationSec = 1800;
-            if (pomoState == STATE_READY) pomoCurrentSec = breakDurationSec;
+            pomoCurrentSec = breakDurationSec; // Update immediately
          }
          needDraw = true;
-      }
-
-      // --- 2. HANDLE BUTTON (Start/Pause) ---
-      if (encPressed) {
-        if (pomoState == STATE_RUNNING) {
-          pomoState = STATE_PAUSED;
-        } else {
-          // If starting from READY, ensure timer is set
-          if (pomoState == STATE_READY) {
-             lastPomoTick = millis();
-          }
-          pomoState = STATE_RUNNING;
-        }
-        needDraw = true;
       }
 
       // --- 3. TIMER LOGIC ---
@@ -1825,12 +1857,12 @@ void loop() {
           lastPomoTick = now;
           if (pomoCurrentSec > 0) {
             pomoCurrentSec--;
-            needDraw = true; // Update screen every second
+            needDraw = true; 
           } else {
             // == TIMER FINISHED ==
             pomoAlarmActive = true;
             pomoAlarmStart = now;
-            pomoState = STATE_READY; // Stop
+            pomoState = STATE_READY; 
             
             // Switch Phase
             if (pomoPhase == PHASE_WORK) {
@@ -1839,7 +1871,6 @@ void loop() {
             } else {
                pomoPhase = PHASE_WORK;
                pomoCurrentSec = workDurationSec;
-               // Increment Step
                pomoStep++;
                if (pomoStep > POMO_MAX_STEPS) pomoStep = 1;
             }
@@ -1848,10 +1879,9 @@ void loop() {
         }
       }
 
-      // --- 4. ALARM / NOTIFICATION ---
+      // --- 4. ALARM ---
       if (pomoAlarmActive) {
         if (now - pomoAlarmStart < 2000) { 
-           // Blink LED and Beep for 2 seconds
            if ((now / 200) % 2 == 0) {
              digitalWrite(LED_PIN, HIGH);
              tone(BUZZ_PIN, 2000);
@@ -1860,32 +1890,20 @@ void loop() {
              noTone(BUZZ_PIN);
            }
         } else {
-           // Stop Alarm
            pomoAlarmActive = false;
            digitalWrite(LED_PIN, LOW);
            noTone(BUZZ_PIN);
-           needDraw = true; // Redraw to clear any alarm visual if added
+           needDraw = true;
         }
       }
 
-      // --- 5. INITIAL DRAW ---
-      // If we just entered mode (you might need a static flag or check prevMode)
-      // For this snippet, relying on `needDraw` is usually enough if triggered by input
-      // but ensure you call `drawPomodoroScreen(true)` when switching TO this mode in the MODE_MENU case.
-      
-      if (needDraw) {
-        // Only full redraw if state changed significantly to save SPI traffic?
-        // For simplicity, we just pass false unless it's a major change.
-        // But our function handles text overdraw cleanly.
-        drawPomodoroScreen(false); 
-      }
+      if (needDraw) drawPomodoroScreen(false);
 
       // Exit
       if (k0Pressed) {
         currentMode = MODE_MENU;
         drawMenu();
       }
-
       break;
     }
 
