@@ -81,6 +81,16 @@ ScioSense_ENS160 ens160(0x53);   // ENS160 I2C address 0x53
 #define AQ_BAR_ORANGE 0xFD20
 #define AQ_BAR_RED    0xF800
 #define CYBER_DARK    0x4208
+#define RAIN 0x8cfe
+
+
+// --- NEW BACKGROUND COLORS (Dimmed for readability) ---
+#define BG_CLEAR      0x0000  // Keep Black for Clear (or use 0x0010 for very dark blue)
+#define BG_CLOUDS     0x2124  // Dark Grey
+#define BG_RAIN       0x0010  // Deep Navy Blue
+#define BG_SNOW       0x632C  // Cold Grey/Blue
+#define BG_THUNDER    0x2004  // Dark Purple/Grey
+
 
 #ifndef PI
 #define PI 3.1415926
@@ -182,12 +192,28 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 }
 
 // ========= Alarm icon =========
+/*
 void drawAlarmIcon() {
   int x = 148;
   tft.fillRect(x - 10, 0, 12, 12, CYBER_BG);
   if (!alarmEnabled) return;
 
   uint16_t c = CYBER_LIGHT; // cam
+  tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
+  tft.drawFastHLine(x - 8, 8, 8, c);
+  tft.fillCircle(x - 4, 10, 1, c);
+}*/
+// ========= Alarm icon =========
+// Now accepts a background color (defaults to Black if not specified)
+void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
+  int x = 148;
+  
+  // Use 'bgColor' instead of CYBER_BG to clear the area
+  tft.fillRect(x - 10, 0, 12, 12, bgColor); 
+
+  if (!alarmEnabled) return;
+
+  uint16_t c = CYBER_LIGHT; // orange
   tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
   tft.drawFastHLine(x - 8, 8, 8, c);
   tft.fillCircle(x - 4, 10, 1, c);
@@ -992,6 +1018,7 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
 }
 
 //========= WHEATER STUF ===========
+/*
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1059,9 +1086,91 @@ void fetchWeather() {
   }
   http.end();
 }
+*/
+void fetchWeather() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
+  WiFiClient client;
+  HTTPClient http;
+  
+  // URL: Get 5-day forecast (we use the first few slots)
+  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
+  
+  http.begin(client, url);
+  int httpCode = http.GET();
 
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    // --- MEMORY FILTER ---
+    JsonDocument filter;
+    filter["list"][0]["dt"] = true;
+    filter["list"][0]["main"]["temp"] = true;
+    filter["list"][0]["main"]["humidity"] = true; // <--- ADDED THIS!
+    filter["list"][0]["weather"][0]["main"] = true;
+    filter["city"]["timezone"] = true;
 
+    JsonDocument doc; 
+    DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+
+    if (!error) {
+      long timezone = doc["city"]["timezone"];
+      
+      // --- 1. UPDATE CURRENT WEATHER VARIABLES ---
+      // The first item in the list (index 0) is the forecast for "Now" (or very close to it)
+      outTemp = doc["list"][0]["main"]["temp"];
+      outHum  = doc["list"][0]["main"]["humidity"]; // <--- Fixes the "0%" issue
+      const char* d = doc["list"][0]["weather"][0]["main"];
+      outDesc = String(d);                            // <--- Fixes the "--" issue
+      
+      // --- 2. UPDATE GRAPH DATA (Points 0-5) ---
+      
+      // Point 0 is "Now"
+      fTemps[0] = outTemp;
+      fRain[0]  = (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0 || outDesc.indexOf("Thunder") >= 0);
+      
+      // Calculate "Now" Hour
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo)) {
+        fHours[0] = timeinfo.tm_hour;
+      } else {
+        fHours[0] = 0; 
+      }
+
+      // Points 1-5 (Next 15 hours)
+      for(int i=0; i<5; i++) {
+        fTemps[i+1] = doc["list"][i]["main"]["temp"]; // Note: list[i] is actually list[i+1] in full json but filter might compress.
+                                                      // Actually, strictly speaking, filter["list"][0] applies to ALL list items in ArduinoJson 7 usually, 
+                                                      // but safely: the API returns list[0], list[1] etc. 
+                                                      // We iterate 0 to 4 from the JSON list to fill graph 1 to 5.
+                                                      // Wait, we need to be careful with indices. 
+                                                      // Let's rely on standard parsing:
+        
+        float t = doc["list"][i]["main"]["temp"]; 
+        // If the filter worked correctly, it applies the pattern to all array elements.
+        
+        fTemps[i+1] = doc["list"][i]["main"]["temp"];
+        const char* w = doc["list"][i]["weather"][0]["main"];
+        String cond = String(w);
+        fRain[i+1] = (cond.indexOf("Rain") >= 0 || cond.indexOf("Drizzle") >= 0 || cond.indexOf("Thunder") >= 0);
+
+        unsigned long dt = doc["list"][i]["dt"];
+        time_t rawTime = (time_t)(dt + timezone); 
+        struct tm* ti = gmtime(&rawTime);   
+        fHours[i+1] = ti->tm_hour;
+      }
+      
+      weatherLoaded = true;
+      forecastLoaded = true;
+      Serial.println("Weather & Forecast Updated.");
+    } else {
+      Serial.print("JSON Error: "); Serial.println(error.c_str());
+    }
+  }
+  http.end();
+}
+
+/*
 void drawWeatherScreen() {
   tft.fillScreen(CYBER_BG);
   
@@ -1089,7 +1198,7 @@ void drawWeatherScreen() {
 
   // Draw Condition (Rain/Clear/etc)
   tft.setTextSize(2);
-  tft.setTextColor(CYBER_GREEN);
+  tft.setTextColor(ST77XX_WHITE);
   int descW = outDesc.length() * 12;
   tft.setCursor((160 - descW) / 2, 80);
   tft.print(outDesc);
@@ -1104,7 +1213,69 @@ void drawWeatherScreen() {
   
   drawAlarmIcon();
 }
+*/ 
 
+void drawWeatherScreen() {
+  // 1. Determine Background based on Condition
+  uint16_t bgCol = CYBER_BG; // Default Black
+  uint16_t txtCol = ST77XX_WHITE;
+  
+  if (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0) {
+    bgCol = BG_RAIN; 
+  } else if (outDesc.indexOf("Cloud") >= 0 || outDesc.indexOf("Mist") >= 0 || outDesc.indexOf("Fog") >= 0) {
+    bgCol = BG_CLOUDS;
+  } else if (outDesc.indexOf("Snow") >= 0) {
+    bgCol = ST77XX_WHITE;
+    txtCol = ST77XX_BLACK;
+  } else if (outDesc.indexOf("Thunder") >= 0) {
+    bgCol = BG_THUNDER;
+  } else if (outDesc.indexOf("Clear") >= 0) {
+    bgCol = BG_CLEAR; 
+  }
+  
+  tft.fillScreen(bgCol);
+  
+  // 2. Header (Top Left)
+  tft.setTextColor(txtCol, bgCol);
+  tft.setTextSize(1);
+  tft.setCursor(10, 5);
+  tft.print("METEO: "); 
+  tft.print(city);
+  
+  if (!weatherLoaded) {
+    tft.setCursor(10, 60);
+    tft.setTextColor(ST77XX_WHITE, bgCol);
+    tft.print("Loading...");
+    return;
+  }
+
+  // 3. Big Temperature (Left Aligned)
+  tft.setTextSize(3);
+  tft.setTextColor(txtCol, bgCol); // Cyan text on colored BG
+  tft.setCursor(10, 35);                 // Moved to Left
+  tft.print(outTemp, 1);
+  tft.setTextSize(1);
+  tft.print(" C");
+
+  // 4. Weather Condition Text (Left Aligned)
+  tft.setTextSize(2);
+  tft.setTextColor(txtCol, bgCol); // White text is safest on colors
+  tft.setCursor(10, 70);                 // Moved to Left
+  tft.print(outDesc);
+
+  // 5. Humidity (Left Aligned)
+  tft.setTextSize(1);
+  tft.setTextColor(txtCol, bgCol);
+  tft.setCursor(10, 100);                // Moved to Left
+  tft.print("Humidity: ");
+  tft.print(outHum);
+  tft.print("%");
+  
+  // Optional: Redraw Alarm Icon since fillScreen wiped it
+  // (We need to update drawAlarmIcon to accept a bg color if we want it perfect, 
+  // but for now, this works if the icon area is black or transparent)
+  drawAlarmIcon(bgCol); 
+}
 
 
 void drawGraphScreen() {
@@ -1177,8 +1348,10 @@ void drawGraphScreen() {
       int nextY = map(fTemps[i+1] * 10, rangeMin * 10, rangeMax * 10, graphBot, graphY);
       int nextX = graphX + (i + 1) * stepX;
       
-      uint16_t color = CYBER_GREEN;
-      if (fRain[i] || fRain[i+1]) color = CYBER_BLUE; 
+      //uint16_t color = CYBER_GREEN;
+      uint16_t color = ST77XX_WHITE;
+      //if (fRain[i] || fRain[i+1]) color = CYBER_BLUE;
+      if (fRain[i] || fRain[i+1]) color = RAIN; 
 
       tft.drawLine(ptX[i], ptY[i], nextX, nextY, color);
       tft.drawLine(ptX[i], ptY[i]+1, nextX, nextY+1, color); // Thicker line
@@ -1297,23 +1470,21 @@ void loop() {
       static int clockPage = 0; 
       static int prevClockPage = -1;
 
-      // 1. Handle Encoder
+      // 1. Handle Encoder (Switch Pages)
       if (encStep != 0) {
         clockPage += encStep;
-        
-        // --- Limit Logic (0 to 2) ---
         if (clockPage < 0) clockPage = 0; 
         if (clockPage > 2) clockPage = 2; 
-        // Note: You can make it wrap-around (0->2) if you prefer circular menu
       }
 
-      // 2. Page Change Logic
+      // 2. Page Change Logic (Draw static UI)
       if (clockPage != prevClockPage) {
         prevClockPage = clockPage;
         tft.fillScreen(CYBER_BG);
         
         if (clockPage == 0) {
-          // --- Page 0: Monitor ---
+          // --- PAGE 0: MONITOR (INSTANT LOAD) ---
+          // We do NOT fetch weather here.
           initClockStaticUI();
           prevTimeStr = ""; 
           updateEnvSensors(true); 
@@ -1321,29 +1492,31 @@ void loop() {
           drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
         } 
         else if (clockPage == 1) {
-          // --- Page 1: Weather ---
+          // --- PAGE 1: WEATHER (FETCH ONLY HERE) ---
+          // Only fetch if we haven't yet, or if data is old (>15 mins)
           if (!weatherLoaded || millis() - lastWeatherFetch > 900000) {
-             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching...");
-             fetchWeather();
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Weather...");
+             fetchWeather(); // <--- This takes 1-2 seconds
              lastWeatherFetch = millis();
-             tft.fillScreen(CYBER_BG); 
+             tft.fillScreen(CYBER_BG); // Clear "Fetching" text
           }
           drawWeatherScreen();
         }
         else {
-          // --- Page 2: Forecast Graph ---
-          if (!forecastLoaded) { 
-             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching...");
+          // --- PAGE 2: GRAPH (FETCH ONLY HERE) ---
+          if (!forecastLoaded || millis() - lastWeatherFetch > 900000) { 
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Forecast...");
              fetchWeather(); 
              lastWeatherFetch = millis();
+             tft.fillScreen(CYBER_BG);
           }
           drawGraphScreen();
         }
       }
 
-      // 3. Update Loop for specific page
+      // 3. Update Loop (Refreshes data while staying on the page)
       if (clockPage == 0) {
-        // Monitor Logic
+        // --- Monitor Update ---
         struct tm timeinfo;
         if (getLocalTime(&timeinfo)) {
           int sec = timeinfo.tm_sec;
@@ -1358,7 +1531,7 @@ void loop() {
         }
       } 
       else {
-        // Weather & Graph Auto-Refresh (15 mins)
+        // --- Weather/Graph Auto-Refresh (every 15 mins) ---
         if (millis() - lastWeatherFetch > 900000) { 
           fetchWeather();
           lastWeatherFetch = millis();
@@ -1367,10 +1540,10 @@ void loop() {
         }
       }
 
-      // 4. Exit
+      // 4. Exit to Menu
       if (k0Pressed) {
         currentMode = MODE_MENU;
-        clockPage = 0; 
+        clockPage = 0; // Reset to Monitor for next time
         prevClockPage = -1; 
         drawMenu();
       }
