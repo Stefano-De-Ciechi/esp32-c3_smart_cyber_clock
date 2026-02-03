@@ -1386,28 +1386,15 @@ void drawGraphScreen() {
 
 //=========
 
-// ========= Day Counter / Year Grid =========
+// ========= Day Counter / Year Progression (grid and circle) =========
 
 bool isLeap(int year) {
   return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
 }
 
-void drawDayCounterScreen() {
+// TAB 1: The Matrix Grid
+void drawYearGrid(int dayIdx, int totalDays) {
   tft.fillScreen(CYBER_BG);
-
-  // 1. Get Time
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    tft.setCursor(10, 50);
-    tft.setTextColor(ST77XX_RED);
-    tft.print("Time Sync Error");
-    return;
-  }
-
-  int year  = timeinfo.tm_year + 1900;
-  int dayIdx = timeinfo.tm_yday; // 0 to 365
-  bool leap  = isLeap(year);
-  int totalDays = leap ? 366 : 365;
 
   // 2. Header
   tft.setTextSize(1);
@@ -1466,6 +1453,149 @@ void drawDayCounterScreen() {
   tft.setCursor(6, 118);
   tft.setTextColor(ST77XX_WHITE);
   tft.printf("Day %d / %d", dayIdx + 1, totalDays);
+}
+
+// ==========================================
+//      YEAR PROGRESS: 12-Month "Sausage" Ring
+// ==========================================
+
+// Helper to draw a thick arc segment with rounded ends ("Sausage")
+// cx, cy: Center of screen
+// r: Mid-radius (center of the sausage thickness)
+// w: Thickness (width of the sausage)
+// startAngle, endAngle: Degrees (0 is right, -90 is up)
+// color: Fill color
+void drawSausageSegment(int cx, int cy, float r, float w, float startAngle, float endAngle, uint16_t color) {
+  // 1. Draw the Arc Body (using radial lines for "solid" look)
+  // We step by 1 degree (or 2 for speed) to fill the arc
+  float halfW = w / 2.0;
+  float rIn  = r - halfW;
+  float rOut = r + halfW;
+  
+  // Convert to radians
+  float degStep = 1.0; 
+  
+  for (float d = startAngle; d <= endAngle; d += degStep) {
+    float rad = d * PI / 180.0;
+    float cosA = cos(rad);
+    float sinA = sin(rad);
+    
+    int x1 = cx + cosA * rIn;
+    int y1 = cy + sinA * rIn;
+    int x2 = cx + cosA * rOut;
+    int y2 = cy + sinA * rOut;
+    
+    tft.drawLine(x1, y1, x2, y2, color);
+  }
+
+  // 2. Draw Rounded Caps (Circles at start and end)
+  // Start Cap
+  /*float radStart = startAngle * PI / 180.0;
+  int capX1 = cx + cos(radStart) * r;
+  int capY1 = cy + sin(radStart) * r;
+  tft.fillCircle(capX1, capY1, halfW, color);
+
+  // End Cap
+  float radEnd = endAngle * PI / 180.0;
+  int capX2 = cx + cos(radEnd) * r;
+  int capY2 = cy + sin(radEnd) * r;
+  tft.fillCircle(capX2, capY2, halfW, color);*/
+}
+
+void drawYearCircle(int dayIdx, int totalDays) {
+  tft.fillScreen(CYBER_BG);
+
+  // --- HEADER ---
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(6, 4);
+  tft.print("YEAR PROGRESS"); // Shortened to fit nicely
+
+  // Stats Text
+  int percent = (int)(((float)(dayIdx + 1) / totalDays) * 100);
+  tft.setCursor(120, 4);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.print(percent); tft.print("%");
+
+  // --- LAYOUT ---
+  int cx = 80;
+  int cy = 72;        // Moved down to leave space for header
+  float radius = 38;  // Radius of the ring center
+  float thickness = 10; // Thickness of the sausage
+  
+  // Month Data
+  int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  
+  // Leap Year Check (Global 'totalDays' passed in is already 366 if leap)
+  if (totalDays == 366) daysInMonth[1] = 29;
+
+  // Calculate current month and day-of-month
+  int currentMonth = 0;
+  int tempDays = dayIdx; // Copy of day index
+  for (int i = 0; i < 12; i++) {
+    if (tempDays < daysInMonth[i]) {
+      currentMonth = i;
+      break;
+    }
+    tempDays -= daysInMonth[i];
+  }
+  int dayOfMonth = tempDays; // Remaining days is the day in current month
+
+  // --- DRAWING LOOP ---
+  // We go from -90 (Top) clockwise
+  float anglePerMonth = 360.0 / 12.0; 
+  float gap = 6.0; // Degrees of gap between sausages
+  
+  for (int m = 0; m < 12; m++) {
+    // Math: -90 is 12 o'clock. 
+    float startDeg = -90.0 + (m * anglePerMonth) + (gap / 2.0);
+    float endDeg   = startDeg + (anglePerMonth - gap);
+
+    // Render Logic
+    if (m < currentMonth) {
+      // 1. PAST MONTH: Full Green Sausage
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_GREEN);
+    } 
+    else if (m > currentMonth) {
+      // 2. FUTURE MONTH: Dark "Empty" Sausage
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_DARK);
+    } 
+    else {
+      // 3. CURRENT MONTH: Partial Fill
+      // First draw the dark background for the whole month
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_DARK);
+      
+      // Calculate how much to fill
+      float progress = (float)(dayOfMonth + 1) / daysInMonth[m];
+      float span = endDeg - startDeg;
+      float fillEnd = startDeg + (span * progress);
+      
+      // Draw the filled portion in Accent Color (Pink/Blue)
+      // Note: If day is 0, we might draw a tiny dot, which is fine.
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, fillEnd, CYBER_PINK);
+    }
+  }
+
+  // --- CENTER INFO ---
+  // Show Month Name or Date in center
+  const char* monthNames[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+  
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  
+  // Center text alignment logic
+  String mName = String(monthNames[currentMonth]);
+  int16_t x1, y1; 
+  uint16_t w, h;
+  tft.getTextBounds(mName, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(cx - w/2, cy - h/2 - 2);
+  tft.print(mName);
+  
+  // Small day number below
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(cx - 6, cy + 10);
+  tft.print(dayOfMonth + 1);
 }
 
 
@@ -1546,7 +1676,6 @@ void loop() {
           dvdInited = false;
         } else if (menuIndex == 4) {
           currentMode = MODE_DAY_COUNTER;
-          drawDayCounterScreen();
         }
       }
       break;
@@ -1759,8 +1888,42 @@ void loop() {
     }
 
     case MODE_DAY_COUNTER: {
+      static int viewPage = 0;      // 0 = Grid, 1 = Circle
+      static int prevViewPage = -1; // Force initial draw
+
+      // 1. Handle Encoder for Tab Switching
+      if (encStep != 0) {
+        viewPage += encStep;
+        if (viewPage < 0) viewPage = 0;
+        if (viewPage > 1) viewPage = 1; // Only 2 pages for now
+      }
+
+      // 2. Draw ONLY if page changed (Efficient!)
+      if (viewPage != prevViewPage) {
+        prevViewPage = viewPage;
+
+        // Get Time Data
+        struct tm timeinfo;
+        if (!getLocalTime(&timeinfo)) {
+          tft.fillScreen(CYBER_BG);
+          tft.setCursor(10, 50);
+          tft.setTextColor(ST77XX_RED);
+          tft.print("Sync Time First!");
+        } else {
+          int year = timeinfo.tm_year + 1900;
+          int dayIdx = timeinfo.tm_yday; // 0..365
+          int total = isLeap(year) ? 366 : 365;
+
+          if (viewPage == 0) drawYearGrid(dayIdx, total);
+          else               drawYearCircle(dayIdx, total);
+        }
+      }
+
+      // 3. Exit to Menu
       if (k0Pressed) {
         currentMode = MODE_MENU;
+        viewPage = 0;     // Reset to default tab
+        prevViewPage = -1; // Reset dirty flag
         drawMenu();
       }
       break;
