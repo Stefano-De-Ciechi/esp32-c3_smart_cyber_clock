@@ -104,11 +104,12 @@ enum UIMode {
   MODE_CLOCK,
   MODE_POMODORO,
   MODE_ALARM,
-  MODE_DVD
+  MODE_DVD,
+  MODE_DAY_COUNTER
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 4;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Day Counter
 
 // ====== Pomodoro ======
 enum PomodoroState {
@@ -670,7 +671,8 @@ void drawMenu() {
     "Monitor",
     "Pomodoro",
     "Alarm",
-    "DVD"
+    "DVD",
+    "Day Counter"
   };
 
   for (int i = 0; i < MENU_ITEMS; i++) {
@@ -1384,7 +1386,87 @@ void drawGraphScreen() {
 
 //=========
 
+// ========= Day Counter / Year Grid =========
 
+bool isLeap(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+void drawDayCounterScreen() {
+  tft.fillScreen(CYBER_BG);
+
+  // 1. Get Time
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    tft.setCursor(10, 50);
+    tft.setTextColor(ST77XX_RED);
+    tft.print("Time Sync Error");
+    return;
+  }
+
+  int year  = timeinfo.tm_year + 1900;
+  int dayIdx = timeinfo.tm_yday; // 0 to 365
+  bool leap  = isLeap(year);
+  int totalDays = leap ? 366 : 365;
+
+  // 2. Header
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(6, 4);
+  tft.print("YEAR PROGRESS");
+  
+  // Draw percentage
+  float progress = ((float)(dayIdx + 1) / totalDays) * 100.0;
+  tft.setCursor(110, 4);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.print((int)progress); tft.print("%");
+
+  drawAlarmIcon(); // Keep UI consistent
+
+  // 3. Grid Settings
+  // We have ~160px width. Let's do 25 columns.
+  // 160 / 25 = ~6.4 pixels per cell. 
+  // We will use 3x3 px box + 3px gap.
+  
+  int cols = 25;
+  int startX = 5; 
+  int startY = 20;
+  int cellStep = 6; // 3px box + 3px gap
+  int boxSize = 3;
+
+  for (int i = 0; i < totalDays; i++) {
+    int row = i / cols;
+    int col = i % cols;
+
+    int x = startX + col * cellStep;
+    int y = startY + row * cellStep;
+
+    uint16_t color;
+
+    if (i < dayIdx) {
+      // Past days: Dim Green or Darker Accent
+      color = 0x03E0; // A darker green (custom) or use CYBER_DARK
+    } else if (i == dayIdx) {
+      // Today: Bright White or Pink
+      color = ST77XX_WHITE; 
+    } else {
+      // Future: Very dark gray (placeholder)
+      color = 0x2104; // Very dark grey
+    }
+
+    tft.fillRect(x, y, boxSize, boxSize, color);
+    
+    // Optional: Highlight "Today" with an extra outline or color
+    if (i == dayIdx) {
+      tft.drawRect(x-1, y-1, boxSize+2, boxSize+2, CYBER_PINK);
+    }
+  }
+
+  // 4. Footer Info
+  tft.setCursor(6, 118);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.printf("Day %d / %d", dayIdx + 1, totalDays);
+}
 
 
 // ========= SETUP =========
@@ -1462,7 +1544,10 @@ void loop() {
         } else if (menuIndex == 3) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } 
+        } else if (menuIndex == 4) {
+          currentMode = MODE_DAY_COUNTER;
+          drawDayCounterScreen();
+        }
       }
       break;
     }
@@ -1670,6 +1755,14 @@ void loop() {
         initDvd();
       }
       updateDvd(encStep, encPressed, k0Pressed);
+      break;
+    }
+
+    case MODE_DAY_COUNTER: {
+      if (k0Pressed) {
+        currentMode = MODE_MENU;
+        drawMenu();
+      }
       break;
     }
 
