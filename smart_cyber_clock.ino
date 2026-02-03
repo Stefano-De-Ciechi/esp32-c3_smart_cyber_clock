@@ -8,6 +8,8 @@
 #include <ScioSense_ENS160.h>
 #include "time.h"
 
+#include "secrets.h"
+
 // --- NEW LIBRARIES FOR MULTI-WIFI ---
 #include <WiFiMulti.h>
 #include <Preferences.h>
@@ -20,8 +22,8 @@ Preferences prefs;
 #include <ArduinoJson.h>
 
 // ====== Weather Settings ======
-String weatherKey = "92ceeffbe3f1b5c8e4b83df88fa92d8c"; // PASTE KEY HERE
-String city       = "Samarate,IT";                     // YOUR CITY (e.g. "London,UK")
+String weatherKey = WEATHER_API_KEY; // PASTE KEY HERE
+String city       = "Magenta,IT";                     // YOUR CITY (e.g. "London,UK")
 
 // Variables to store data
 float outTemp = 0.0;
@@ -75,6 +77,7 @@ ScioSense_ENS160 ens160(0x53);   // ENS160 I2C address 0x53
 #define CYBER_LIGHT   0xFD20  
 #define CYBER_BLUE    0x07FF  
 #define CYBER_PINK    0xF81F
+#define CYBER_GREY    0x0777
 
 #define AQ_BAR_GREEN  0x07E0
 #define AQ_BAR_YELLOW 0xFFE0
@@ -92,11 +95,12 @@ enum UIMode {
   MODE_CLOCK,
   MODE_POMODORO,
   MODE_ALARM,
-  MODE_DVD
+  MODE_DVD,
+  MODE_DAYCOUNTER
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 4;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Day Counter
 
 // ====== Pomodoro ======
 enum PomodoroState {
@@ -399,7 +403,7 @@ void connectWiFiAndSyncTime() {
     wm.setAPCallback(configModeCallback);
     
     // Start Pop-up
-    bool res = wm.autoConnect("Cyber Clock");
+    bool res = wm.autoConnect(AP_SSID, AP_PASSWORD);
 
     if (!res) {
       tft.fillScreen(CYBER_BG);
@@ -642,7 +646,8 @@ void drawMenu() {
     "Monitor",
     "Pomodoro",
     "Alarm",
-    "DVD"
+    "DVD",
+    "Day Counter"
   };
 
   for (int i = 0; i < MENU_ITEMS; i++) {
@@ -991,6 +996,95 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
   drawDvdLogo(dvdX, dvdY, dvdColors[dvdColorIndex]);
 }
 
+// ========= Day Counter =============
+#define GRID_COLS 26
+#define GRID_ROWS 14
+
+#define DOT_SIZE 4
+#define DOT_SPACING 2
+
+#define TOP_BAR 16
+#define MARGIN 3
+
+#define WEEK_COLOR  ST77XX_BLUE
+#define FUTURE_COLOR CYBER_GREY
+#define PAST_COLOR   ST77XX_GREEN
+#define TODAY_COLOR ST77XX_YELLOW
+
+
+bool dayCounterInited = false;
+int screenWidth = 0, screenHeigth = 0;
+
+int dayOfYear(struct tm* t) {
+  return t->tm_yday + 1; // 1–365/366
+}
+
+bool isLeap(int year) {
+  return ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+}
+
+int gridWidth() {
+  return GRID_COLS * (DOT_SIZE + DOT_SPACING) - DOT_SPACING;
+}
+
+int gridHeight() {
+  return GRID_ROWS * (DOT_SIZE + DOT_SPACING) - DOT_SPACING;
+}
+
+
+void initDayCounter() {
+  dayCounterInited = true;
+  /*tft.fillScreen(CYBER_BG);
+
+  tft.drawRect(0, 0, tft.width() - 1, tft.height() - 1, CYBER_LIGHT);
+  Serial.print("w: ");
+  Serial.print(tft.width());
+  Serial.print("h: ");
+  Serial.println(tft.height());*/
+}
+
+void drawDayCounter(bool encPressed, int day, int totalDays) {
+  (void)encPressed;
+
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // border
+  tft.drawRect(0, 0, tft.width() - 1, tft.height() - 1, CYBER_LIGHT);
+
+  // Header
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(4, 4);
+  tft.print("Day Counter");
+
+  tft.setCursor(110, 4);
+  tft.print(day);
+  tft.print("/");
+  tft.print(totalDays);
+
+  int startX = MARGIN;
+  int startY = TOP_BAR + 4;
+
+  int index = 1;
+
+  for (int row = 0; row < GRID_ROWS; row++) {
+    for (int col = 0; col < GRID_COLS; col++) {
+      if (index > totalDays) return;
+
+      int x = startX + col * (DOT_SIZE + DOT_SPACING);
+      int y = startY + row * (DOT_SIZE + DOT_SPACING);
+
+      uint16_t color = CYBER_GREY;
+
+      if (index < day) color = CYBER_LIGHT;
+      else if (index == day) color = ST77XX_YELLOW;
+
+      tft.fillRoundRect(x, y, DOT_SIZE, DOT_SIZE, 2, color);
+      index++;
+    }
+  }
+}
+
 //========= WHEATER STUF ===========
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
@@ -1287,7 +1381,10 @@ void loop() {
         } else if (menuIndex == 3) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } 
+        } else if (menuIndex == 4) {
+          currentMode = MODE_DAYCOUNTER;
+          dayCounterInited = false;
+        }
       }
       break;
     }
@@ -1495,6 +1592,22 @@ void loop() {
         initDvd();
       }
       updateDvd(encStep, encPressed, k0Pressed);
+      break;
+    }
+
+    case MODE_DAYCOUNTER: {
+      if (!dayCounterInited) {
+        initDayCounter();
+        drawDayCounter(encPressed, 34, 365);
+      }
+
+      //drawDayCounter(encPressed, k0Pressed);
+      if (k0Pressed) {
+        dayCounterInited = false;
+        currentMode = MODE_MENU;
+        drawMenu();
+        return;
+      }
       break;
     }
 
