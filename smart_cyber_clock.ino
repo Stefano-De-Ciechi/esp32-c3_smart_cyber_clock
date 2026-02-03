@@ -8,6 +8,8 @@
 #include <ScioSense_ENS160.h>
 #include "time.h"
 
+#include "secrets.h"
+
 // --- NEW LIBRARIES FOR MULTI-WIFI ---
 #include <WiFiMulti.h>
 #include <Preferences.h>
@@ -20,8 +22,8 @@ Preferences prefs;
 #include <ArduinoJson.h>
 
 // ====== Weather Settings ======
-String weatherKey = "92ceeffbe3f1b5c8e4b83df88fa92d8c"; // PASTE KEY HERE
-String city       = "Samarate,IT";                     // YOUR CITY (e.g. "London,UK")
+String weatherKey = WEATHER_API_KEY;
+String city       = WEATHER_API_CITY;       // YOUR CITY (e.g. "London,UK")
 
 // Variables to store data
 float outTemp = 0.0;
@@ -425,7 +427,7 @@ void connectWiFiAndSyncTime() {
     wm.setAPCallback(configModeCallback);
     
     // Start Pop-up
-    bool res = wm.autoConnect("Cyber Clock");
+    bool res = wm.autoConnect(AP_SSID, AP_PASSWORD);
 
     if (!res) {
       tft.fillScreen(CYBER_BG);

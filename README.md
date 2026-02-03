@@ -8,13 +8,22 @@ Be sure to create a file named "**secrets.h**" (new tab in the Arduino IDE) and 
 
 #pragma once
 
-#define WIFI_SSID "your wifi ssid here"
-#define WIFI_PASSWORD "your wifi password here"
+// credentials used when esp goes into "Hotspot Mode" (Accesso Point - AP)
+#define AP_SSID ""
+#define AP_PASSWORD ""
+
+// API key from openweathermap.org
+#define WEATHER_API_KEY ""
+#define WEATHER_API_CITY ""     //ex. "London,UK"
+
 ```
 
 # Todo:
 
-- [ ] Integrate Wi-Fi Manager library to setup wifi credentials at runtime
+- [x] Integrate Wi-Fi Manager library to setup wifi credentials at runtime
+  - [ ] enable an option to re-enter Access Point mode to set/unset/reset WiFi credentials
+- [x] Integrate Weather informations from OpenWeatherMap.org
+  - [ ] optimize API calls (only when switching to Weather panels from Monitor tab)
 - [ ] Optimize software (low power mode, disable display and wifi when not used)
 - [ ] Add settings tab
   - [ ] led mode (off, on, blink)

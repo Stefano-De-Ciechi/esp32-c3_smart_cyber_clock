@@ -1,1 +1,4 @@
 secrets.h
+.vscode
+.DS_STORE
+.arduino-build
