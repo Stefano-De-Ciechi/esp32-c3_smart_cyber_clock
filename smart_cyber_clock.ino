@@ -45,6 +45,82 @@ bool  fRain[6];     // Rain flag for each interval
 int   fHours[6];    // Hour of the day (0-23) for X-axis labels
 bool  forecastLoaded = false;
 
+
+
+
+
+
+// ====== SETTINGS CONFIG ======
+
+// 1. LOCATIONS
+struct City {
+  const char* name;  // Display Name
+  const char* query; // API Query
+};
+
+const City myLocations[3] = {
+  { "Samarate", "Samarate,IT" },  // Example: Change these to your real preferences
+  { "Magenta",    "Magenta,IT" },
+  { "Zurigo",   "Zurich,CH" }
+};
+
+int locationIndex = 0; 
+
+// 2. LED MODES
+enum LedMode {
+  LED_OFF = 0,    
+  LED_ON,         
+  LED_BLINK       
+};
+
+int ledMode = LED_BLINK;      
+int defaultBlinkInterval = 1000;
+
+
+
+// ====== Settings Menu Logic ======
+enum SettingsState {
+  SET_MAIN = 0, // Top level: "Location", "LED Mode"
+  SET_LOC,      // Sub level: "Rome", "London", etc.
+  SET_LED,       // Sub level: "Off", "On", "Blink"
+  SET_BRT,      // <--- NEW: Add this line
+  SET_TIMEOUT   // <--- NEW: Add this line
+};
+
+SettingsState settingsState = SET_MAIN;
+int setMainIndex = 0; // Cursor for Top Level
+int setSubIndex  = 0; // Cursor for Sub Level
+
+
+
+
+
+// 3. BRIGHTNESS
+int lcdBrightness = 255; // 0-255 (Max)
+
+// 4. DISPLAY TIMEOUT
+enum DisplayTimeout {
+  DISP_ALWAYS_ON = 0,
+  DISP_15_SEC,
+  DISP_30_SEC,
+  DISP_60_SEC
+};
+int displayTimeoutMode = DISP_ALWAYS_ON;
+
+// Timing trackers
+unsigned long lastInteractionTime = 0; // Tracks last button/encoder use
+bool displayIsOff = false;
+
+// Hardware Pin (CHANGE THIS TO YOUR BOARD'S BACKLIGHT PIN)
+// For TTGO T-Display: 4
+// For standard ESP32 w/ TFT: Often 32 or 15
+#define TFT_BL 4  
+
+// ...
+
+
+
+
 // ====== Pins ======
 #define TFT_CS   9
 #define TFT_DC   8
@@ -102,11 +178,12 @@ enum UIMode {
   MODE_CLOCK,
   MODE_POMODORO,
   MODE_ALARM,
-  MODE_DVD
+  MODE_DVD,
+  MODE_SETTINGS
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 4;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Game
 
 // ====== Pomodoro ======
 enum PomodoroState {
@@ -668,7 +745,8 @@ void drawMenu() {
     "Monitor",
     "Pomodoro",
     "Alarm",
-    "DVD"
+    "DVD",
+    "Settings"
   };
 
   for (int i = 0; i < MENU_ITEMS; i++) {
@@ -856,32 +934,43 @@ void checkAlarmTrigger() {
 
 // ========= Alert visual + audio =========
 void updateAlertStateAndLED() {
-  if (alarmRinging) currentAlertLevel = ALERT_ALARM;
-  else if (curECO2 > 1800) currentAlertLevel = ALERT_CO2;
-  else currentAlertLevel = ALERT_NONE;
-
   unsigned long now = millis();
 
-  unsigned long interval;
-  if (currentAlertLevel == ALERT_ALARM)      interval = 120;
-  else if (currentAlertLevel == ALERT_CO2)   interval = 250;
-  else                                       interval = 1000;
+  // 1. Handle LED based on Mode
+  if (ledMode == LED_OFF) {
+    digitalWrite(LED_PIN, LOW);
+  } 
+  else if (ledMode == LED_ON) {
+    digitalWrite(LED_PIN, HIGH);
+  } 
+  else {
+    // --- MODE: BLINKING ---
+    if (alarmRinging) currentAlertLevel = ALERT_ALARM;
+    else if (curECO2 > 1800) currentAlertLevel = ALERT_CO2;
+    else currentAlertLevel = ALERT_NONE;
 
-  if (now - lastLedToggleMs > interval) {
-    lastLedToggleMs = now;
-    ledState = !ledState;
-    digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    unsigned long interval;
+    if (currentAlertLevel == ALERT_ALARM)      interval = 120;
+    else if (currentAlertLevel == ALERT_CO2)   interval = 250;
+    else                                       interval = defaultBlinkInterval; 
+
+    if (now - lastLedToggleMs > interval) {
+      lastLedToggleMs = now;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
   }
 
-  if (currentAlertLevel == ALERT_CO2) {
-    if (now - lastCo2BlinkMs > 350) {
+  // 2. Audio/CO2 Warning (Independent of LED)
+  if (curECO2 > 1800) {
+     if (now - lastCo2BlinkMs > 350) {
       lastCo2BlinkMs = now;
       co2BlinkOn = !co2BlinkOn;
       uint16_t baseCol = colorForCO2(curECO2);
       uint16_t col = co2BlinkOn ? baseCol : CYBER_DARK;
       drawCO2Value(curECO2, col);
       tone(BUZZ_PIN, 1800, 80);
-    }
+     }
   }
 }
 
@@ -1094,7 +1183,9 @@ void fetchWeather() {
   HTTPClient http;
   
   // URL: Get 5-day forecast (we use the first few slots)
-  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
+  
+  String q = myLocations[locationIndex].query;
+  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + q + "&appid=" + weatherKey + "&units=metric&cnt=6";
   
   http.begin(client, url);
   int httpCode = http.GET();
@@ -1218,15 +1309,13 @@ void drawWeatherScreen() {
 void drawWeatherScreen() {
   // 1. Determine Background based on Condition
   uint16_t bgCol = CYBER_BG; // Default Black
-  uint16_t txtCol = ST77XX_WHITE;
   
   if (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0) {
     bgCol = BG_RAIN; 
   } else if (outDesc.indexOf("Cloud") >= 0 || outDesc.indexOf("Mist") >= 0 || outDesc.indexOf("Fog") >= 0) {
     bgCol = BG_CLOUDS;
   } else if (outDesc.indexOf("Snow") >= 0) {
-    bgCol = ST77XX_WHITE;
-    txtCol = ST77XX_BLACK;
+    bgCol = BG_SNOW;
   } else if (outDesc.indexOf("Thunder") >= 0) {
     bgCol = BG_THUNDER;
   } else if (outDesc.indexOf("Clear") >= 0) {
@@ -1236,11 +1325,14 @@ void drawWeatherScreen() {
   tft.fillScreen(bgCol);
   
   // 2. Header (Top Left)
-  tft.setTextColor(txtCol, bgCol);
+  tft.setTextColor(CYBER_LIGHT, bgCol);
   tft.setTextSize(1);
   tft.setCursor(10, 5);
   tft.print("METEO: "); 
-  tft.print(city);
+  
+  // --- FIX: USE DYNAMIC NAME FROM SETTINGS ---
+  tft.print(myLocations[locationIndex].name); 
+  // ------------------------------------------
   
   if (!weatherLoaded) {
     tft.setCursor(10, 60);
@@ -1251,29 +1343,27 @@ void drawWeatherScreen() {
 
   // 3. Big Temperature (Left Aligned)
   tft.setTextSize(3);
-  tft.setTextColor(txtCol, bgCol); // Cyan text on colored BG
-  tft.setCursor(10, 35);                 // Moved to Left
+  tft.setTextColor(CYBER_ACCENT, bgCol); 
+  tft.setCursor(10, 35);                 
   tft.print(outTemp, 1);
   tft.setTextSize(1);
   tft.print(" C");
 
   // 4. Weather Condition Text (Left Aligned)
   tft.setTextSize(2);
-  tft.setTextColor(txtCol, bgCol); // White text is safest on colors
-  tft.setCursor(10, 70);                 // Moved to Left
+  tft.setTextColor(ST77XX_WHITE, bgCol); 
+  tft.setCursor(10, 70);                 
   tft.print(outDesc);
 
   // 5. Humidity (Left Aligned)
   tft.setTextSize(1);
-  tft.setTextColor(txtCol, bgCol);
-  tft.setCursor(10, 100);                // Moved to Left
+  tft.setTextColor(ST77XX_WHITE, bgCol);
+  tft.setCursor(10, 100);                
   tft.print("Humidity: ");
   tft.print(outHum);
   tft.print("%");
   
-  // Optional: Redraw Alarm Icon since fillScreen wiped it
-  // (We need to update drawAlarmIcon to accept a bg color if we want it perfect, 
-  // but for now, this works if the icon area is black or transparent)
+  // 6. Draw Alarm Icon (passing the background color)
   drawAlarmIcon(bgCol); 
 }
 
@@ -1384,11 +1474,87 @@ void drawGraphScreen() {
 
 
 
+void loadSettings() {
+  prefs.begin("cyber-conf", true); // Open "cyber-conf" namespace (Read Only)
+  
+  locationIndex = prefs.getInt("locIdx", 0);
+  ledMode       = prefs.getInt("ledMode", LED_BLINK);
+  
+  // Safety check
+  if (locationIndex < 0 || locationIndex > 2) locationIndex = 0;
+  lcdBrightness      = prefs.getInt("brt", 255);        // Default Max
+  displayTimeoutMode = prefs.getInt("timeout", DISP_ALWAYS_ON);
+  prefs.end();
+}
+
+void saveSettings() {
+  prefs.begin("cyber-conf", false); // Open "cyber-conf" namespace (Read/Write)
+  
+  prefs.putInt("locIdx", locationIndex);
+  prefs.putInt("ledMode", ledMode);
+  prefs.putInt("brt", lcdBrightness);
+  prefs.putInt("timeout", displayTimeoutMode);
+  prefs.end();
+  
+  // Reset flags so the new location is fetched immediately
+  weatherLoaded = false; 
+  forecastLoaded = false;
+}
+
+
+// Generic function to draw ANY list menu (Main, Settings, Sub-settings)
+void drawListMenu(const char* title, const char* items[], int count, int selIndex) {
+  tft.fillScreen(CYBER_BG);
+
+  // Title
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(10, 10);
+  tft.print(title);
+
+  // Draw List Items
+  for (int i = 0; i < count; i++) {
+    int y = 32 + i * 18; // Spacing logic from your original menu
+    
+    if (i == selIndex) {
+      // Selected: Cyan Bar + Black Text
+      tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
+      tft.setTextColor(CYBER_BG);
+    } else {
+      // Unselected: Black BG + White Text
+      tft.fillRect(6, y - 2, 148, 14, CYBER_BG);
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    
+    tft.setCursor(12, y);
+    tft.print(items[i]);
+  }
+  
+  // Optional: Draw Icons if needed
+  drawAlarmIcon(); 
+}
+
+
+
+void setScreenBrightness(int val) {
+  // In ESP32 Core 3.0+, we write to the PIN, not the channel
+  // val is 0-255
+  if (val < 5) val = 5; // Safety minimum
+  ledcWrite(TFT_BL, val);
+}
+
 
 // ========= SETUP =========
 void setup() {
   Serial.begin(115200);
+  loadSettings();
   delay(1500);
+
+  pinMode(TFT_BL, OUTPUT);
+
+  ledcAttach(TFT_BL, 5000, 8); // 5000 Hz, 8-bit resolution
+  
+  setScreenBrightness(lcdBrightness); // Apply saved brightness
 
   pinMode(ENC_A_PIN,   INPUT_PULLUP);
   pinMode(ENC_B_PIN,   INPUT_PULLUP);
@@ -1422,10 +1588,38 @@ void setup() {
 
 // ========= LOOP =========
 void loop() {
-
+  // 1. Read Inputs
   int encStep     = readEncoderStep();
   bool encPressed = checkButtonPressed(ENC_BTN_PIN, lastEncBtn);
   bool k0Pressed  = checkButtonPressed(KEY0_PIN,    lastKey0);
+
+  // --- HANDLE SCREEN TIMEOUT & WAKE ---
+  // If any input is detected, reset the timer and wake the screen
+  if (encStep != 0 || encPressed || k0Pressed) {
+    lastInteractionTime = millis();
+    if (displayIsOff) {
+      displayIsOff = false;
+      setScreenBrightness(lcdBrightness); // Restore saved brightness
+      
+      // Optional: Consume the click so it wakes the screen but doesn't trigger an action immediately
+      // If you prefer the first click to also do something, remove the line below.
+      if (encPressed) encPressed = false; 
+    }
+  }
+
+  // Check if we need to turn the screen off
+  if (!displayIsOff && displayTimeoutMode != DISP_ALWAYS_ON) {
+    unsigned long timeoutMs = 0;
+    if (displayTimeoutMode == DISP_15_SEC) timeoutMs = 15000;
+    else if (displayTimeoutMode == DISP_30_SEC) timeoutMs = 30000;
+    else if (displayTimeoutMode == DISP_60_SEC) timeoutMs = 60000;
+    
+    if (millis() - lastInteractionTime > timeoutMs) {
+      displayIsOff = true;
+      setScreenBrightness(0); // Turn OFF backlight
+    }
+  }
+  // ------------------------------------
 
   checkAlarmTrigger();
   updateAlertStateAndLED();
@@ -1460,7 +1654,15 @@ void loop() {
         } else if (menuIndex == 3) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } 
+        } else if (menuIndex == 4) { // Settings
+          currentMode = MODE_SETTINGS;
+          settingsState = SET_MAIN; // Always start at top
+          setMainIndex = 0;         // Reset cursor
+          
+          // Draw the initial screen immediately
+          const char* initialItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", initialItems, 4, 0);
+        }
       }
       break;
     }
@@ -1483,8 +1685,7 @@ void loop() {
         tft.fillScreen(CYBER_BG);
         
         if (clockPage == 0) {
-          // --- PAGE 0: MONITOR (INSTANT LOAD) ---
-          // We do NOT fetch weather here.
+          // --- PAGE 0: MONITOR ---
           initClockStaticUI();
           prevTimeStr = ""; 
           updateEnvSensors(true); 
@@ -1492,18 +1693,17 @@ void loop() {
           drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
         } 
         else if (clockPage == 1) {
-          // --- PAGE 1: WEATHER (FETCH ONLY HERE) ---
-          // Only fetch if we haven't yet, or if data is old (>15 mins)
+          // --- PAGE 1: WEATHER ---
           if (!weatherLoaded || millis() - lastWeatherFetch > 900000) {
              tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Weather...");
-             fetchWeather(); // <--- This takes 1-2 seconds
+             fetchWeather(); 
              lastWeatherFetch = millis();
-             tft.fillScreen(CYBER_BG); // Clear "Fetching" text
+             tft.fillScreen(CYBER_BG); 
           }
           drawWeatherScreen();
         }
         else {
-          // --- PAGE 2: GRAPH (FETCH ONLY HERE) ---
+          // --- PAGE 2: GRAPH ---
           if (!forecastLoaded || millis() - lastWeatherFetch > 900000) { 
              tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Forecast...");
              fetchWeather(); 
@@ -1514,9 +1714,8 @@ void loop() {
         }
       }
 
-      // 3. Update Loop (Refreshes data while staying on the page)
+      // 3. Update Loop
       if (clockPage == 0) {
-        // --- Monitor Update ---
         struct tm timeinfo;
         if (getLocalTime(&timeinfo)) {
           int sec = timeinfo.tm_sec;
@@ -1531,7 +1730,7 @@ void loop() {
         }
       } 
       else {
-        // --- Weather/Graph Auto-Refresh (every 15 mins) ---
+        // Auto-Refresh Weather/Graph every 15 mins
         if (millis() - lastWeatherFetch > 900000) { 
           fetchWeather();
           lastWeatherFetch = millis();
@@ -1543,7 +1742,7 @@ void loop() {
       // 4. Exit to Menu
       if (k0Pressed) {
         currentMode = MODE_MENU;
-        clockPage = 0; // Reset to Monitor for next time
+        clockPage = 0; 
         prevClockPage = -1; 
         drawMenu();
       }
@@ -1638,10 +1837,7 @@ void loop() {
           alarmEnabled = !alarmEnabled;
           changed = true;
         }
-
-        if (changed) {
-          lastAlarmDayTriggered = -1;
-        }
+        if (changed) lastAlarmDayTriggered = -1;
       }
 
       if (encPressed) {
@@ -1659,7 +1855,6 @@ void loop() {
         drawAlarmScreen(false);
         drawAlarmIcon();
       }
-
       break;
     }
 
@@ -1671,5 +1866,171 @@ void loop() {
       break;
     }
 
+    case MODE_SETTINGS: {
+      // --- STATE 1: TOP LEVEL ---
+      if (settingsState == SET_MAIN) {
+        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" }; 
+        bool changed = false;
+
+        // Navigation
+        if (encStep != 0) {
+          setMainIndex += encStep;
+          if (setMainIndex < 0) setMainIndex = 3;
+          if (setMainIndex > 3) setMainIndex = 0;
+          changed = true;
+        }
+
+        // Enter Sub-Menu
+        if (encPressed) {
+          if (setMainIndex == 0) {
+             settingsState = SET_LOC;
+             setSubIndex = locationIndex; 
+             const char* items[] = { myLocations[0].name, myLocations[1].name, myLocations[2].name };
+             drawListMenu("SELECT CITY", items, 3, setSubIndex);
+          } else if (setMainIndex == 1) {
+             settingsState = SET_LED;
+             setSubIndex = ledMode;
+             const char* items[] = { "Always Off", "Always On", "Blinking" };
+             drawListMenu("LED MODE", items, 3, setSubIndex);
+          } else if (setMainIndex == 2) {
+             // BRIGHTNESS (Slider Logic)
+             settingsState = SET_BRT;
+             tft.fillScreen(CYBER_BG);
+             tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
+             tft.setCursor(60, 60); tft.setTextSize(3); tft.print(lcdBrightness);
+          } else {
+             // TIMEOUT
+             settingsState = SET_TIMEOUT;
+             setSubIndex = displayTimeoutMode;
+             const char* items[] = { "Always On", "15 Seconds", "30 Seconds", "60 Seconds" };
+             drawListMenu("TIMEOUT", items, 4, setSubIndex);
+          }
+          return; 
+        }
+
+        if (changed) drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+      } 
+      
+      // --- STATE 2: LOCATION SUB-MENU ---
+      else if (settingsState == SET_LOC) {
+        const char* locItems[] = { myLocations[0].name, myLocations[1].name, myLocations[2].name };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 2;
+          if (setSubIndex > 2) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (locationIndex != setSubIndex) {
+            locationIndex = setSubIndex;
+            saveSettings(); 
+            tone(BUZZ_PIN, 2000, 100); 
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("SELECT CITY", locItems, 3, setSubIndex);
+      } 
+
+      // --- STATE 3: LED SUB-MENU ---
+      else if (settingsState == SET_LED) {
+        const char* ledItems[] = { "Always Off", "Always On", "Blinking" };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 2;
+          if (setSubIndex > 2) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (ledMode != setSubIndex) {
+            ledMode = setSubIndex;
+            saveSettings();
+            tone(BUZZ_PIN, 2000, 100);
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("LED MODE", ledItems, 3, setSubIndex);
+      }
+
+      // --- STATE 4: BRIGHTNESS ---
+      else if (settingsState == SET_BRT) {
+        if (encStep != 0) {
+          lcdBrightness += (encStep * 25); 
+          if (lcdBrightness > 255) lcdBrightness = 255;
+          if (lcdBrightness < 5)   lcdBrightness = 5; 
+          
+          setScreenBrightness(lcdBrightness); 
+          
+          // Redraw Value
+          tft.fillScreen(CYBER_BG);
+          tft.setTextSize(1); tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
+          tft.setTextSize(3); tft.setCursor(50, 60); tft.setTextColor(ST77XX_WHITE);
+          tft.print(map(lcdBrightness, 0, 255, 0, 100)); tft.print("%");
+        }
+
+        if (encPressed) {
+          saveSettings();
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+      }
+
+      // --- STATE 5: TIMEOUT ---
+      else if (settingsState == SET_TIMEOUT) {
+        const char* tItems[] = { "Always On", "15 Seconds", "30 Seconds", "60 Seconds" };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 3;
+          if (setSubIndex > 3) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (displayTimeoutMode != setSubIndex) {
+            displayTimeoutMode = setSubIndex;
+            saveSettings();
+            tone(BUZZ_PIN, 2000, 100);
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("TIMEOUT", tItems, 4, setSubIndex);
+      }
+      
+      // --- EXIT / BACK LOGIC (K0 Button) ---
+      if (k0Pressed) {
+        if (settingsState != SET_MAIN) {
+          // If in sub-menu, cancel and go back
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+        } else {
+          // If in Main Settings, exit to Clock Menu
+          currentMode = MODE_MENU;
+          drawMenu();
+        }
+      }
+      break;
+    }
   }
 }
