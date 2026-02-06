@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include <Wire.h>
 #include <SPI.h>
@@ -7,6 +8,7 @@
 #include <Adafruit_AHTX0.h>
 #include <ScioSense_ENS160.h>
 #include "time.h"
+
 
 // --- NEW LIBRARIES FOR MULTI-WIFI ---
 #include <WiFiMulti.h>
@@ -48,6 +50,16 @@ bool  forecastLoaded = false;
 
 
 
+
+
+
+
+// ====== NEW: WORD OF THE DAY (WotD) ======
+String wotdWord = "Loading...";
+String wotdDef  = "";
+bool   wotdLoaded = false;
+unsigned long lastWotdFetch = 0;
+int  wotdContentHeight = 0; // <--- ADD THIS (Stores the total pixel height of the text)
 
 
 // ====== SETTINGS CONFIG ======
@@ -118,7 +130,7 @@ bool displayIsOff = false;
 
 // ...
 
-
+int menuScrollY = 0; // Tracks the vertical scroll of the menu
 
 
 // ====== Pins ======
@@ -179,27 +191,39 @@ enum UIMode {
   MODE_POMODORO,
   MODE_ALARM,
   MODE_DVD,
-  MODE_SETTINGS
+  MODE_SETTINGS,
+  MODE_WORD
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 6;       // Monitor, Pomodoro, Alarm, DVD, Game
 
-// ====== Pomodoro ======
-enum PomodoroState {
-  POMO_SELECT = 0,
-  POMO_RUNNING,
-  POMO_PAUSED,
-  POMO_DONE
+
+// ====== POMODORO GLOBALS ======
+enum PomoPhase {
+  PHASE_WORK = 0,
+  PHASE_BREAK
 };
-PomodoroState pomoState = POMO_SELECT;
-int  pomoPresetIndex    = 0;                   // 0:5, 1:15, 2:30
-const uint16_t pomoDurationsMin[3] = {5, 15, 30};
-unsigned long pomoStartMillis = 0;
-unsigned long pomoPausedMillis = 0;
-int prevPomoRemainSec  = -1;
-int prevPomoPreset     = -1;
-int prevPomoStateInt   = -1;
+
+enum PomoState {
+  STATE_READY = 0, // Waiting to start
+  STATE_RUNNING,   // Counting down
+  STATE_PAUSED     // Paused
+};
+
+PomoPhase pomoPhase = PHASE_WORK;
+PomoState pomoState = STATE_READY;
+
+long workDurationSec  = 25 * 60; // Default 25 min
+long breakDurationSec = 5 * 60;  // Default 5 min
+
+long pomoCurrentSec = 0;        // Current countdown value
+unsigned long lastPomoTick = 0; // Tracks millis for seconds
+int pomoStep = 1;               // Session Counter (1/4)
+const int POMO_MAX_STEPS = 4;
+
+bool pomoAlarmActive = false;   // Is the alarm ringing?
+unsigned long pomoAlarmStart = 0;
 
 // ====== Env values ======
 float    curTemp = 0;
@@ -732,7 +756,511 @@ void drawEnvDynamic(float temp, float hum, uint16_t tvoc, uint16_t eco2) {
                    ST77XX_WHITE);
 }
 
+
+// WORD OF THE DAY 
+// ====== WotD Helper Functions ======
+
+// Helper to replace Italian accents for standard display compatibility
+
+// ====== WotD Helper Functions ======
+
+// ====== WotD Helper Functions ======
+
+String fixAccents(String str) {
+  str.replace("&quot;", "\"");
+  str.replace("&rsquo;", "'");
+  str.replace("&#8217;", "'");
+  str.replace("&#8220;", "\""); 
+  str.replace("&#8221;", "\""); 
+  str.replace("&laquo;", "\""); // HTML Left Quote
+  str.replace("&raquo;", "\""); // HTML Right Quote
+
+  // UTF-8 Accents
+  str.replace("\xC3\xA0", "a'"); // à
+  str.replace("\xC3\xA8", "e'"); // è
+  str.replace("\xC3\xA9", "e'"); // é
+  str.replace("\xC3\xAC", "i'"); // ì
+  str.replace("\xC3\xB2", "o'"); // ò
+  str.replace("\xC3\xB9", "u'"); // ù
+  str.replace("\xC3\x80", "A'"); // À
+  str.replace("\xC3\x88", "E'"); // È
+  str.replace("\xC3\x89", "E'"); // É
+  
+  // Smart Quotes & Guillemets
+  str.replace("\xE2\x80\x98", "'"); 
+  str.replace("\xE2\x80\x99", "'"); 
+  str.replace("‘", "'"); 
+  str.replace("’", "'");
+  str.replace("\xC2\xAB", "\""); 
+  str.replace("\xC2\xBB", "\""); 
+  
+  return str;
+}
+
+String cleanHtml(String raw) {
+  String clean = "";
+  bool insideTag = false;
+  
+  // 1. Remove Tags
+  for (int i = 0; i < raw.length(); i++) {
+    char c = raw.charAt(i);
+    if (c == '<') {
+      insideTag = true;
+    } else if (c == '>') {
+      insideTag = false;
+      clean += " "; 
+    } else if (!insideTag) {
+      clean += c;
+    }
+  }
+  
+  // 2. Collapse spaces but KEEP Newlines
+  String finalStr = "";
+  bool spaceFound = false;
+  
+  for(int i=0; i<clean.length(); i++){
+    char c = clean.charAt(i);
+    if (c == '\n') { // Keep the newline!
+      finalStr += c;
+      spaceFound = false;
+    } 
+    else if(c == ' ' || c == '\r' || c == '\t'){
+      if(!spaceFound) {
+        finalStr += " ";
+        spaceFound = true;
+      }
+    } else {
+      finalStr += c;
+      spaceFound = false;
+    }
+  }
+  return finalStr;
+}
+
+
+void calculateContentHeight() {
+  // Logic matches drawWordScreen exactly to ensure sync
+  int cursorX = 10; 
+  int cursorY = 0; // Start at 0 to count pure height
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10; 
+        cursorY += lineHeight;
+      }
+      
+      cursorX += wordWidth;
+      
+      if (c == ' ') cursorX += 6; 
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+  // Add one last line height for the final row
+  wotdContentHeight = cursorY + lineHeight;
+}
+
+void fetchWordOfDay() {
+  if (WiFi.status() != WL_CONNECTED) {
+    wotdWord = "WiFi Disconnected";
+    wotdDef  = "Check connection.";
+    wotdLoaded = true;
+    return;
+  }
+
+  String url = "https://unaparolaalgiorno.it/"; 
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure(); 
+  
+  http.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)");
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  
+  http.begin(client, url);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    // 1. Find Word
+    int linkIndex = payload.indexOf("unaparolaalgiorno.it/significato/");
+    if (linkIndex == -1) linkIndex = payload.indexOf("/significato/");
+
+    if (linkIndex > 0) {
+       int wordStartTag = payload.indexOf(">", linkIndex);
+       int wordEndTag   = payload.indexOf("<", wordStartTag);
+       
+       String rawWord = payload.substring(wordStartTag + 1, wordEndTag);
+       rawWord.replace("LEGGI ", ""); 
+       wotdWord = fixAccents(cleanHtml(rawWord));
+
+       // 2. Find Definition
+       String searchArea = payload.substring(wordEndTag, wordEndTag + 3000);
+       
+       // Force Newlines on Block Tags
+       searchArea.replace("</div>", "\n");
+       searchArea.replace("</span>", "\n"); // Added span support
+       searchArea.replace("</p>",   "\n");
+       searchArea.replace("<br>",   "\n");
+       
+       // Force separation for the Example line
+       searchArea.replace("»", "»\n"); 
+       searchArea.replace("!", "!\n"); 
+       searchArea.replace("&raquo;", "»\n");
+
+       String cleanArea = cleanHtml(searchArea);
+       
+       String fullDefinition = "";
+       int cursor = 0;
+       bool stopReading = false;
+       
+       while (cursor < cleanArea.length() && !stopReading) {
+         int nextNewLine = cleanArea.indexOf('\n', cursor);
+         if (nextNewLine == -1) nextNewLine = cleanArea.length();
+         
+         String line = cleanArea.substring(cursor, nextNewLine);
+         
+         line = fixAccents(line);
+         line.trim();
+         
+         if (line.length() > 3) {
+           // STOP if we hit the "LEGGI" button
+           if (line.indexOf("LEGGI ") != -1 || line.indexOf("Leggi ") != -1) {
+             stopReading = true; 
+             continue; 
+           }
+
+           // --- UPDATED FILTER ---
+           // We ONLY filter out junk links. We KEEP quotes and "es."
+           bool isJunk = false;
+           
+           if (line.indexOf("unaparolaalgiorno") != -1) isJunk = true;
+
+           if (!isJunk) {
+              // Add double newline if we are appending to existing text
+              if (fullDefinition.length() > 0) fullDefinition += "\n\n";
+              fullDefinition += line;
+           }
+         }
+         cursor = nextNewLine + 1; 
+       }
+
+       if (fullDefinition.length() == 0) wotdDef = "Def not found.";
+       else wotdDef = fullDefinition;
+       
+       if (wotdDef.length() > 800) wotdDef = wotdDef.substring(0, 800) + "...";
+       calculateContentHeight();
+       wotdLoaded = true;
+       Serial.println("Word: " + wotdWord);
+    } else {
+      wotdWord = "Parse Error";
+      wotdDef  = "Link not found.";
+      wotdLoaded = true;
+    }
+  } else {
+    wotdWord = "HTTP Error";
+    wotdDef  = String(httpCode);
+    wotdLoaded = true;
+  }
+  http.end();
+}
+
+// [Updated] Word of Day Screen with Flicker Reduction
+/*
+void drawWordScreen(int scrollOffset, bool fullRedraw = false) {
+  
+  // === CONFIGURATION ===
+  int headerHeight = 50;  // The Title area (0 to 35)
+  int screenWidth  = 160;
+  int screenHeight = 128;
+  
+  // --- PART 1: DRAW THE HEADER (Only on first load or full reset) ---
+  if (fullRedraw) {
+    tft.fillScreen(CYBER_BG); // Clear everything once
+    
+    // Draw Title
+    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
+    tft.setTextSize(2);
+    
+    int wLen = wotdWord.length() * 12; // Approx width for size 2
+    int xPos = (screenWidth - wLen) / 2;
+    if(xPos < 0) xPos = 0;
+    
+    tft.setCursor(xPos, 5); // Title starts at Y=5
+    tft.print(wotdWord);
+    
+    // Draw Divider Line (Safe Visual Separator)
+    tft.drawFastHLine(0, 32, screenWidth, CYBER_DARK);
+    
+  } else {
+    // --- PART 2: SCROLLING UPDATE (Clear only the bottom) ---
+    // CRITICAL FIX: Start clearing at 'headerHeight' (35). 
+    // If this is lower than 30, it cuts the title.
+    tft.fillRect(0, headerHeight, screenWidth, screenHeight - headerHeight, CYBER_BG);
+  }
+
+  // If text isn't loaded yet, stop here
+  if (!wotdLoaded) {
+    tft.setCursor(10, 60);
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("Loading...");
+    return;
+  }
+
+  // --- PART 3: DRAW THE SCROLLING TEXT ---
+  tft.setTextWrap(false); 
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+
+  int startY = 45 - scrollOffset; // Text "virtual" start position
+  int cursorX = 10; 
+  int cursorY = startY;
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    
+    // Word wrapping logic
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      
+      // === DRAWING CHECK ===
+      // Only draw if the text is physically below the header line
+      if (currentWord.length() > 0) {
+        if (cursorY >= headerHeight && cursorY < 128) {
+           tft.setCursor(cursorX, cursorY);
+           tft.print(currentWord);
+        }
+      }
+      
+      cursorX += wordWidth;
+      if (c == ' ') cursorX += 6;
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+
+  // --- PART 4: SCROLL INDICATORS ---
+  // Re-draw scroll arrows on top of everything if needed
+  if(scrollOffset > 0) {
+     tft.fillTriangle(150, headerHeight + 2, 154, headerHeight + 6, 146, headerHeight + 6, CYBER_ACCENT);
+  }
+  if(cursorY > 128) {
+     tft.fillTriangle(150, 124, 154, 120, 146, 120, CYBER_ACCENT);
+  }
+}*/
+/*
+void drawWordScreen(int scrollOffset, bool fullRedraw) {
+  
+  // === CONFIG: SAFETY MARGINS ===
+  // We push the scrolling text down to 40px to give the Title plenty of room.
+  int headerLimit = 40; 
+
+  // --- PART 1: DRAW HEADER (Only does this if fullRedraw is TRUE) ---
+  if (fullRedraw) {
+    tft.fillScreen(CYBER_BG);
+    
+    // Draw Title
+    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
+    tft.setTextSize(2);
+    
+    // Center the Title
+    int wLen = wotdWord.length() * 12;
+    int xPos = (160 - wLen) / 2;
+    if(xPos < 0) xPos = 0;
+    
+    tft.setCursor(xPos, 5); // Title starts at Y=5
+    tft.print(wotdWord);
+    
+    // Debug: If you still see a line, this specific fillRect might be the cause
+    // But since we are inside 'fullRedraw', it happens BEFORE text is drawn.
+  } else {
+    // --- PART 2: SCROLL CLEARING (Only Clear BELOW the header) ---
+    // This rectangle clears the scrolling area. 
+    // It starts at 'headerLimit' (40). The title ends around 25. 
+    // There is now a 15px safe gap.
+    tft.fillRect(0, headerLimit, 160, 128 - headerLimit, CYBER_BG);
+  }
+
+  if (!wotdLoaded) {
+    tft.setCursor(10, 60);
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("Loading...");
+    return;
+  }
+
+  // --- PART 3: DRAW SCROLLING TEXT ---
+  tft.setTextWrap(false); 
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+
+  int startY = 50 - scrollOffset; // Start text a bit lower (50)
+  int cursorX = 10; 
+  int cursorY = startY;
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      
+      // === DRAWING CHECK ===
+      // Only draw if the text is physically BELOW the header limit
+      if (currentWord.length() > 0) {
+        if (cursorY >= headerLimit && cursorY < 128) {
+           tft.setCursor(cursorX, cursorY);
+           tft.print(currentWord);
+        }
+      }
+      
+      cursorX += wordWidth;
+      if (c == ' ') cursorX += 6;
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+
+  // Scroll Indicator (Bottom only)
+  if(cursorY > 128) {
+     tft.fillTriangle(150, 124, 154, 120, 146, 120, CYBER_ACCENT);
+  }
+}*/
+void drawWordScreen(int scrollOffset, bool fullRedraw) {
+  
+  // === CONFIG ===
+  // 35px is the "Safe Line". 
+  // Title sits above this. Scrolling text sits below this.
+  int headerLimit = 45; 
+
+  // --- PART 1: DRAW HEADER (Only on Full Redraw) ---
+  if (fullRedraw) {
+    tft.fillScreen(CYBER_BG);
+    
+    // Draw Title
+    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
+    tft.setTextSize(2);
+    
+    // Center the Title
+    int wLen = wotdWord.length() * 12;
+    int xPos = (160 - wLen) / 2;
+    if(xPos < 0) xPos = 0;
+    
+    tft.setCursor(xPos, 5); 
+    tft.print(wotdWord);
+    
+    // (Decorative line removed)
+    
+  } else {
+    // --- PART 2: SCROLL CLEARING ---
+    // Clear only the bottom area (Below 35px)
+    tft.fillRect(0, headerLimit, 160, 128 - headerLimit, CYBER_BG);
+  }
+
+  if (!wotdLoaded) {
+    tft.setCursor(10, 60);
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("Loading...");
+    return;
+  }
+
+  // --- PART 3: DRAW SCROLLING TEXT ---
+  tft.setTextWrap(false); 
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+
+  int startY = 45 - scrollOffset; 
+  int cursorX = 10; 
+  int cursorY = startY;
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      
+      // === DRAWING CHECK ===
+      // Only draw if text is BELOW the header limit (35)
+      if (currentWord.length() > 0) {
+        if (cursorY >= headerLimit && cursorY < 128) {
+           tft.setCursor(cursorX, cursorY);
+           tft.print(currentWord);
+        }
+      }
+      
+      cursorX += wordWidth;
+      if (c == ' ') cursorX += 6;
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+
+  // (Arrows removed completely)
+}
+
 // ========= Menu UI =========
+/*
 void drawMenu() {
   tft.fillScreen(CYBER_BG);
 
@@ -746,6 +1274,7 @@ void drawMenu() {
     "Pomodoro",
     "Alarm",
     "DVD",
+    "Word of Day",
     "Settings"
   };
 
@@ -762,101 +1291,266 @@ void drawMenu() {
     tft.print(items[i]);
   }
   drawAlarmIcon();
+}*/
+void drawMenu() {
+  tft.fillScreen(CYBER_BG);
+
+  // --- 1. Define Layout ---
+  const int ITEM_HEIGHT   = 18;
+  const int HEADER_HEIGHT = 35; // The "Safe Zone" at the top
+  const int VISIBLE_H     = 128 - HEADER_HEIGHT;
+  
+  const char* items[] = {
+    "Monitor",
+    "Pomodoro",
+    "Alarm",
+    "DVD",
+    "Word of Day",
+    "Settings"
+  };
+
+  // --- 2. DRAW HEADER FIRST (Static Layer) ---
+  // We draw this first so it establishes the "do not touch" zone.
+  tft.fillRect(0, 0, 160, HEADER_HEIGHT, CYBER_BG);
+  
+  tft.setTextColor(CYBER_LIGHT, CYBER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  tft.print("MODE SELECT");
+  drawAlarmIcon();
+
+  // --- 3. Auto-Scroll Logic ---
+  int selectionY = menuIndex * ITEM_HEIGHT;
+  int margin = ITEM_HEIGHT; 
+  
+  // Scroll Down
+  if (selectionY < menuScrollY + margin) {
+     menuScrollY = selectionY - margin;
+  }
+  // Scroll Up
+  if (selectionY + ITEM_HEIGHT > menuScrollY + VISIBLE_H - margin) {
+     menuScrollY = (selectionY + ITEM_HEIGHT) - (VISIBLE_H - margin);
+  }
+  
+  // Clamp
+  int totalListHeight = MENU_ITEMS * ITEM_HEIGHT;
+  int maxScroll = totalListHeight - VISIBLE_H + margin; 
+  if (maxScroll < 0) maxScroll = 0;
+  if (menuScrollY < 0) menuScrollY = 0;
+  if (menuScrollY > maxScroll) menuScrollY = maxScroll;
+
+
+  // --- 4. Draw Items (The Flicker Fix) ---
+  int startY = HEADER_HEIGHT - menuScrollY;
+
+  tft.setTextSize(1);
+  
+  for (int i = 0; i < MENU_ITEMS; i++) {
+    int y = startY + (i * ITEM_HEIGHT);
+    
+    // === CRITICAL FIX ===
+    // If the item's position is inside the Header Area, DO NOT DRAW IT.
+    // This prevents the "draw then cover" flicker.
+    if (y < HEADER_HEIGHT) continue; 
+    
+    // Also skip if it's off the bottom of the screen
+    if (y > 128) continue;
+
+    // Now it is safe to draw
+    if (i == menuIndex) {
+      tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
+      tft.setTextColor(CYBER_BG);
+    } else {
+      tft.fillRect(6, y - 2, 148, 14, CYBER_BG); 
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    
+    tft.setCursor(12, y);
+    tft.print(items[i]); 
+  }
+
+  // Optional: Draw Scroll Arrows (Safe to draw last as they are small)
+  if (menuScrollY > 0) tft.fillTriangle(150, 20, 154, 24, 146, 24, CYBER_ACCENT);
+  if (menuScrollY < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
 }
 
 // ========= Pomodoro =========
-uint16_t pomoColorFromFrac(float f) {
-  if (f < 0.33f) return AQ_BAR_GREEN;
-  if (f < 0.66f) return AQ_BAR_YELLOW;
-  if (f < 0.85f) return AQ_BAR_ORANGE;
-  return AQ_BAR_RED;
-}
+/*
+void drawPomodoroScreen(bool fullRedraw) {
+  if (fullRedraw) tft.fillScreen(CYBER_BG);
 
-// Vòng Pomodoro 270°
-void drawPomodoroRing(float progress) {
-  int cx = 80;
-  int cy = 64;
-  int rOuter = 55;
-  int rInner = 44;
-
-  // Vẽ cung 270°: từ -225° đến +45° (chừa hở đáy)
-  const float startDeg = -225.0f;
-  const float endDeg   =   45.0f;
-  const float spanDeg  = endDeg - startDeg;   // 270°
-
-  for (float deg = startDeg; deg <= endDeg; deg += 6.0f) {
-    float frac = (deg - startDeg) / spanDeg;   // 0..1
-    uint16_t col = (frac <= progress) ? pomoColorFromFrac(frac) : CYBER_DARK;
-
-    float rad = deg * PI / 180.0f;
-    int xOuter = cx + cos(rad) * rOuter;
-    int yOuter = cy + sin(rad) * rOuter;
-    int xInner = cx + cos(rad) * rInner;
-    int yInner = cy + sin(rad) * rInner;
-    tft.drawLine(xInner, yInner, xOuter, yOuter, col);
-  }
-}
-
-void drawPomodoroScreen(bool forceStatic) {
-  bool needStatic = forceStatic;
-  if (prevPomoPreset != pomoPresetIndex || prevPomoStateInt != (int)pomoState) {
-    needStatic = true;
-    prevPomoPreset   = pomoPresetIndex;
-    prevPomoStateInt = (int)pomoState;
-  }
-
-  if (needStatic) {
-    tft.fillScreen(CYBER_BG);
-    tft.fillRect(0, 0, 160, 16, CYBER_BG);
-    tft.setTextSize(1);
-    tft.setCursor(8, 4);
-    tft.setTextColor(CYBER_LIGHT);
-    tft.print("POMODORO");
-    drawAlarmIcon();
-  }
-
+  // 1. TOP HEADER (Cleared to prevent flicker/overlap)
+  tft.fillRect(0, 0, 160, 14, CYBER_BG);
   tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-  tft.fillRect(100, 0, 60, 16, CYBER_BG);
-  tft.setCursor(108, 4);
-  tft.printf("%2d min", pomoDurationsMin[pomoPresetIndex]);
+  tft.setCursor(6, 4);
+  
+  if (pomoPhase == PHASE_WORK) {
+    tft.setTextColor(CYBER_ACCENT, CYBER_BG);
+    tft.print("WORK SESSION");
+  } else {
+    tft.setTextColor(CYBER_GREEN, CYBER_BG);
+    tft.print("BREAK TIME");
+  }
 
-  unsigned long durationMs = pomoDurationsMin[pomoPresetIndex] * 60UL * 1000UL;
-  unsigned long elapsed = 0;
-  if (pomoState == POMO_RUNNING)      elapsed = millis() - pomoStartMillis;
-  else if (pomoState == POMO_PAUSED)  elapsed = pomoPausedMillis - pomoStartMillis;
-  else if (pomoState == POMO_DONE)    elapsed = durationMs;
-  if (elapsed > durationMs) elapsed = durationMs;
+  // "PAUSED" / "READY" Indicator (Top Right)
+  tft.setCursor(100, 4);
+  if (pomoState == STATE_PAUSED) {
+    tft.setTextColor(ST77XX_ORANGE, CYBER_BG);
+    tft.print("PAUSED");
+  } else if (pomoState == STATE_READY) {
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("READY");
+  } 
 
-  float progress = (durationMs > 0) ? (float)elapsed / durationMs : 0.0f;
-  drawPomodoroRing(progress);
+  // 2. CENTER TIMER (Big Text)
+  int m = pomoCurrentSec / 60;
+  int s = pomoCurrentSec % 60;
+  char timeBuf[10];
+  sprintf(timeBuf, "%02d:%02d", m, s);
 
-  int cx = 80;
-  int cy = 64;
-  tft.fillCircle(cx, cy, 38, CYBER_BG);
-
-  unsigned long remain = durationMs - elapsed;
-  uint16_t rmMin = remain / 60000UL;
-  uint8_t  rmSec = (remain / 1000UL) % 60;
-
-  char buf[8];
-  sprintf(buf, "%02d:%02d", rmMin, rmSec);
-
-  int16_t x1, y1;
-  uint16_t w, h;
+  // Measure text width to center it perfectly
   tft.setTextSize(3);
-  tft.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-  tft.setCursor(cx - w / 2, cy - 8);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-  tft.print(buf);
+  int16_t x1, y1; 
+  uint16_t w, h;
+  tft.getTextBounds("00:00", 0, 0, &x1, &y1, &w, &h);
+  
+  int textX = (160 - w) / 2;
+  int textY = 45;
 
-  // Footer: chỉ hiện Paused / Completed
-  tft.fillRect(0, 96, 160, 32, CYBER_BG);
+  // Clear previous numbers to prevent ghosting
+  tft.fillRect(textX - 4, textY - 4, w + 8, h + 8, CYBER_BG);
+  
+  tft.setCursor(textX, textY);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+  tft.print(timeBuf);
+
+  // 3. PROGRESS BAR
+  long totalDuration = (pomoPhase == PHASE_WORK) ? workDurationSec : breakDurationSec;
+  float progress = 1.0 - ((float)pomoCurrentSec / totalDuration);
+  if (progress < 0) progress = 0;
+  if (progress > 1) progress = 1;
+
+  int barX = 10;
+  int barY = 80;
+  int barW = 140;
+  int barH = 6;
+  
+  // Draw frame only on full redraw
+  if (fullRedraw) tft.drawRect(barX-1, barY-1, barW+2, barH+2, CYBER_DARK);
+  
+  int fillW = (int)(barW * progress);
+  uint16_t barColor = (pomoPhase == PHASE_WORK) ? CYBER_PINK : CYBER_GREEN;
+  
+  tft.fillRect(barX, barY, fillW, barH, barColor);
+  tft.fillRect(barX + fillW, barY, barW - fillW, barH, CYBER_BG);
+
+  // 4. BOTTOM FOOTER
+  tft.fillRect(0, 108, 160, 20, CYBER_BG); // Clear footer
+
   tft.setTextSize(1);
-  tft.setCursor(8, 100);
-  tft.setTextColor(CYBER_GREEN, CYBER_BG);
-  if (pomoState == POMO_PAUSED)      tft.print("Paused");
-  else if (pomoState == POMO_DONE)   tft.print("Completed");
+  tft.setTextColor(CYBER_LIGHT, CYBER_BG);
+  
+  char footerBuf[30];
+  long otherVal = (pomoPhase == PHASE_WORK) ? breakDurationSec : workDurationSec;
+  const char* label = (pomoPhase == PHASE_WORK) ? "Break" : "Work";
+  
+  sprintf(footerBuf, "%s: %02d:%02d", label, (int)(otherVal/60), (int)(otherVal%60));
+  tft.setCursor(6, 110);
+  tft.print(footerBuf);
+
+  tft.setCursor(100, 110);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+  tft.printf("Step: %d/%d", pomoStep, POMO_MAX_STEPS);
+  
+  // Optional: Draw Alarm Icon if you have that function
+  // drawAlarmIcon(); 
+}*/
+void drawPomodoroScreen(bool fullRedraw) {
+  // --- 1. STATIC LAYER (Draw only ONCE) ---
+  if (fullRedraw) {
+    tft.fillScreen(CYBER_BG);
+    
+    // Header
+    tft.fillRect(0, 0, 160, 14, CYBER_BG);
+    tft.setTextSize(1);
+    tft.setCursor(6, 4);
+    if (pomoPhase == PHASE_WORK) {
+      tft.setTextColor(CYBER_ACCENT, CYBER_BG);
+      tft.print("WORK SESSION");
+    } else {
+      tft.setTextColor(CYBER_GREEN, CYBER_BG);
+      tft.print("BREAK TIME");
+    }
+    
+    // Bar Outline
+    tft.drawRect(9, 79, 142, 8, CYBER_DARK);
+    
+    // Footer Info
+    tft.setTextColor(CYBER_LIGHT, CYBER_BG);
+    char footerBuf[30];
+    long otherVal = (pomoPhase == PHASE_WORK) ? breakDurationSec : workDurationSec;
+    const char* label = (pomoPhase == PHASE_WORK) ? "Break" : "Work";
+    sprintf(footerBuf, "%s: %02d:%02d", label, (int)(otherVal/60), (int)(otherVal%60));
+    tft.setCursor(6, 110);
+    tft.print(footerBuf);
+    
+    tft.setCursor(100, 110);
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.printf("Step: %d/%d", pomoStep, POMO_MAX_STEPS);
+  }
+
+  // --- 2. DYNAMIC LAYER (Update every frame) ---
+  
+  // A. STATUS INDICATOR (Top Right)
+  // We use setTextColor(FG, BG) to overwrite previous text without flickering
+  tft.setTextSize(1);
+  tft.setCursor(100, 4);
+  if (pomoState == STATE_PAUSED) {
+    tft.setTextColor(ST77XX_ORANGE, CYBER_BG);
+    tft.print("PAUSED");
+  } else if (pomoState == STATE_READY) {
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("READY "); 
+  } else {
+    // Running: Print spaces to clear "READY" or "PAUSED"
+    tft.setTextColor(CYBER_BG, CYBER_BG);
+    tft.print("      "); 
+  }
+
+  // B. MAIN TIMER
+  int m = pomoCurrentSec / 60;
+  int s = pomoCurrentSec % 60;
+  char timeBuf[10];
+  sprintf(timeBuf, "%02d:%02d", m, s);
+
+  tft.setTextSize(3);
+  
+  // Calculate center (approximate width for "00:00" is 90px at size 3)
+  int textX = (160 - (5 * 18)) / 2; 
+  int textY = 45;
+
+  tft.setCursor(textX, textY);
+  // CRITICAL FIX: Draw White Text on Black BG. No fillRect needed!
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG); 
+  tft.print(timeBuf);
+
+  // C. PROGRESS BAR
+  long totalDuration = (pomoPhase == PHASE_WORK) ? workDurationSec : breakDurationSec;
+  float progress = 1.0 - ((float)pomoCurrentSec / totalDuration);
+  if (progress < 0) progress = 0;
+  if (progress > 1) progress = 1;
+
+  int barX = 10;
+  int barY = 80;
+  int barW = 140;
+  int barH = 6;
+  int fillW = (int)(barW * progress);
+  
+  uint16_t barColor = (pomoPhase == PHASE_WORK) ? CYBER_PINK : CYBER_GREEN;
+  
+  // Only draw changes? No, drawing rects is fast enough.
+  tft.fillRect(barX, barY, fillW, barH, barColor);
+  tft.fillRect(barX + fillW, barY, barW - fillW, barH, CYBER_BG);
 }
 
 // ========= Alarm UI =========
@@ -1325,7 +2019,7 @@ void drawWeatherScreen() {
   tft.fillScreen(bgCol);
   
   // 2. Header (Top Left)
-  tft.setTextColor(CYBER_LIGHT, bgCol);
+  tft.setTextColor(ST77XX_WHITE, bgCol);
   tft.setTextSize(1);
   tft.setCursor(10, 5);
   tft.print("METEO: "); 
@@ -1343,7 +2037,7 @@ void drawWeatherScreen() {
 
   // 3. Big Temperature (Left Aligned)
   tft.setTextSize(3);
-  tft.setTextColor(CYBER_ACCENT, bgCol); 
+  tft.setTextColor(ST77XX_WHITE, bgCol); 
   tft.setCursor(10, 35);                 
   tft.print(outTemp, 1);
   tft.setTextSize(1);
@@ -1640,12 +2334,17 @@ void loop() {
           updateEnvSensors(true);
           drawClockTime(getTimeStr('H'), getTimeStr('M'), getTimeStr('S'));
           drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
-        } else if (menuIndex == 1) {
+        } else if (menuIndex == 1) { // POMODORO Selected
           currentMode = MODE_POMODORO;
-          pomoState = POMO_SELECT;
-          prevPomoRemainSec = -1;
-          prevPomoPreset = -1;
-          prevPomoStateInt = -1;
+          
+          // --- FIX: Use NEW variables, delete the OLD ones ---
+          pomoState = STATE_READY;  // We use STATE_READY, not POMO_SELECT
+          
+          // Ensure timer has a value if it's the first time running
+          if (pomoCurrentSec == 0) pomoCurrentSec = workDurationSec;
+          drawPomodoroScreen(true);
+          
+          // Draw the screen
           drawPomodoroScreen(true);
         } else if (menuIndex == 2) {
           currentMode = MODE_ALARM;
@@ -1654,7 +2353,17 @@ void loop() {
         } else if (menuIndex == 3) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } else if (menuIndex == 4) { // Settings
+        } else if (menuIndex == 4) { // Word of Day
+          currentMode = MODE_WORD;
+          // Fetch only if never loaded or stale (> 4 hours)
+          if (!wotdLoaded || millis() - lastWotdFetch > 14400000) {
+          tft.fillScreen(CYBER_BG);
+          tft.setCursor(10,60); tft.print("Fetching...");
+          fetchWordOfDay();
+          lastWotdFetch = millis();
+          }
+          drawWordScreen(0,true);
+        } else if (menuIndex == 5) { // Settings
           currentMode = MODE_SETTINGS;
           settingsState = SET_MAIN; // Always start at top
           setMainIndex = 0;         // Reset cursor
@@ -1750,56 +2459,126 @@ void loop() {
     }
 
     case MODE_POMODORO: {
-      if (pomoState == POMO_SELECT && encStep != 0) {
-        pomoPresetIndex += encStep;
-        if (pomoPresetIndex < 0) pomoPresetIndex = 2;
-        if (pomoPresetIndex > 2) pomoPresetIndex = 0;
-        prevPomoRemainSec = -1;
-        drawPomodoroScreen(true);
-      }
+      bool needDraw = false;
+      unsigned long now = millis();
 
-      if (encPressed) {
-        if (pomoState == POMO_SELECT || pomoState == POMO_DONE) {
-          pomoState = POMO_RUNNING;
-          pomoStartMillis = millis();
-          prevPomoRemainSec = -1;
-          drawPomodoroScreen(true);
-        } else if (pomoState == POMO_RUNNING) {
-          pomoState = POMO_PAUSED;
-          pomoPausedMillis = millis();
-          drawPomodoroScreen(true);
-        } else if (pomoState == POMO_PAUSED) {
-          unsigned long pauseDur = millis() - pomoPausedMillis;
-          pomoStartMillis += pauseDur;
-          pomoState = POMO_RUNNING;
-          prevPomoRemainSec = -1;
-          drawPomodoroScreen(true);
+      // --- 1. HANDLE BUTTON (Click vs Long Press) ---
+      static unsigned long btnDownStart = 0;
+      static bool longPressHandled = false;
+      
+      // We read the pin directly for Long Press logic
+      bool btnState = digitalRead(ENC_BTN_PIN);
+      
+      if (btnState == LOW) { // Button IS Pressed
+        if (btnDownStart == 0) btnDownStart = now; // Just pressed
+        
+        // CHECK FOR LONG PRESS RESET (> 3000ms)
+        if (!longPressHandled && (now - btnDownStart > 3000)) {
+           // == RESET ACTION ==
+           pomoState = STATE_READY;
+           pomoPhase = PHASE_WORK;
+           pomoStep = 1;
+           pomoCurrentSec = workDurationSec;
+           pomoAlarmActive = false;
+           longPressHandled = true; // Prevent multiple resets
+           
+           // Visual Feedback
+           tft.fillScreen(CYBER_BG);
+           tft.setTextSize(1);
+           tft.setCursor(50, 60); tft.setTextColor(ST77XX_RED); tft.print("RESET!");
+           tone(BUZZ_PIN, 1000, 500);
+           delay(1000);
+           drawPomodoroScreen(true);
+        }
+      } 
+      else { // Button IS Released
+        if (btnDownStart != 0) {
+           // If we didn't handle a long press, it's a CLICK
+           if (!longPressHandled) {
+              // == START/PAUSE ACTION ==
+              if (pomoState == STATE_RUNNING) {
+                pomoState = STATE_PAUSED;
+              } else {
+                if (pomoState == STATE_READY) lastPomoTick = millis();
+                pomoState = STATE_RUNNING;
+              }
+              needDraw = true;
+           }
+           btnDownStart = 0;
+           longPressHandled = false;
         }
       }
 
-      if (pomoState == POMO_RUNNING || pomoState == POMO_PAUSED || pomoState == POMO_DONE) {
-        unsigned long durationMs = pomoDurationsMin[pomoPresetIndex] * 60UL * 1000UL;
-        unsigned long elapsed = 0;
-        if (pomoState == POMO_RUNNING) elapsed = millis() - pomoStartMillis;
-        else if (pomoState == POMO_PAUSED) elapsed = pomoPausedMillis - pomoStartMillis;
-        else if (pomoState == POMO_DONE) elapsed = durationMs;
+      // --- 2. HANDLE ENCODER (Adjust Time) ---
+      // Only allow adjustment if STATE_READY
+      if (pomoState == STATE_READY && encStep != 0) {
+         long adjustment = encStep * 60; // 1 click = 1 minute
+         
+         if (pomoPhase == PHASE_WORK) {
+            workDurationSec += adjustment;
+            if (workDurationSec < 60) workDurationSec = 60; 
+            if (workDurationSec > 3600) workDurationSec = 3600; 
+            pomoCurrentSec = workDurationSec;
+         } else {
+            breakDurationSec += adjustment;
+            if (breakDurationSec < 30) breakDurationSec = 30;
+            if (breakDurationSec > 1800) breakDurationSec = 1800;
+            pomoCurrentSec = breakDurationSec;
+         }
+         needDraw = true;
+      }
 
-        if (elapsed > durationMs) {
-          elapsed = durationMs;
-          if (pomoState != POMO_DONE) {
-            pomoState = POMO_DONE;
-            tone(BUZZ_PIN, 2000, 500);
-            drawPomodoroScreen(true);
+      // --- 3. TIMER LOGIC ---
+      if (pomoState == STATE_RUNNING) {
+        if (now - lastPomoTick >= 1000) {
+          lastPomoTick = now;
+          if (pomoCurrentSec > 0) {
+            pomoCurrentSec--;
+            needDraw = true;
+          } else {
+            // == TIMER FINISHED ==
+            pomoAlarmActive = true;
+            pomoAlarmStart = now;
+            pomoState = STATE_READY; 
+            
+            // Switch Phase
+            if (pomoPhase == PHASE_WORK) {
+               pomoPhase = PHASE_BREAK;
+               pomoCurrentSec = breakDurationSec;
+            } else {
+               pomoPhase = PHASE_WORK;
+               pomoCurrentSec = workDurationSec;
+               pomoStep++;
+               if (pomoStep > POMO_MAX_STEPS) pomoStep = 1;
+            }
+            needDraw = true;
           }
         }
+      }
 
-        int remainSec = (durationMs - elapsed) / 1000UL;
-        if (remainSec != prevPomoRemainSec) {
-          prevPomoRemainSec = remainSec;
-          drawPomodoroScreen(false);
+      // --- 4. ALARM BEEP ---
+      if (pomoAlarmActive) {
+        if (now - pomoAlarmStart < 2000) { 
+           // Beep pattern
+           if ((now / 200) % 2 == 0) {
+             digitalWrite(LED_PIN, HIGH);
+             tone(BUZZ_PIN, 2000);
+           } else {
+             digitalWrite(LED_PIN, LOW);
+             noTone(BUZZ_PIN);
+           }
+        } else {
+           // Stop Alarm
+           pomoAlarmActive = false;
+           digitalWrite(LED_PIN, LOW);
+           noTone(BUZZ_PIN);
+           needDraw = true;
         }
       }
 
+      if (needDraw) drawPomodoroScreen(false);
+
+      // Exit Button (K0)
       if (k0Pressed) {
         currentMode = MODE_MENU;
         drawMenu();
@@ -2031,6 +2810,47 @@ void loop() {
         }
       }
       break;
+    } case MODE_WORD: {
+      static int wordScroll = 0;
+      
+      if (encStep != 0) {
+        wordScroll += (encStep * 10);
+        if (wordScroll < 0) wordScroll = 0;
+        
+        // --- DYNAMIC SCROLL LIMIT ---
+        // Viewport height is approx 90px (128 screen - 35 top margin)
+        // Max Scroll = Total Text Height - Viewport Height + Padding
+        int maxScroll = wotdContentHeight - 90 + 20; 
+        if (maxScroll < 0) maxScroll = 0;
+        
+        if (wordScroll > maxScroll) wordScroll = maxScroll;
+        
+        drawWordScreen(wordScroll,false);
+      }
+
+      // Refresh
+      if (encPressed) {
+        tft.fillScreen(CYBER_BG);
+        tft.setTextSize(1);
+        tft.setCursor(50, 60); tft.setTextColor(CYBER_ACCENT); 
+        tft.print("Reloading...");
+        fetchWordOfDay();
+        lastWotdFetch = millis();
+        wordScroll = 0;
+        drawWordScreen(0,true);
+      }
+
+      // Exit
+      if (k0Pressed) {
+        currentMode = MODE_MENU;
+        drawMenu();
+      }
+      break;
     }
+  
+  
+
+  
+  
   }
 }
