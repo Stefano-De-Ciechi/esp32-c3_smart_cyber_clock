@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 #include <Wire.h>
 #include <SPI.h>
@@ -32,20 +33,88 @@ String outDesc = "--";
 unsigned long lastWeatherFetch = 0;
 bool weatherLoaded = false;
 
-
 // ====== WiFi & Time config ======
 
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec      = 1 * 3600;   // GMT+1
 const int   daylightOffset_sec = 0;
 
-
-
 // ====== Forecast Data ======
 float fTemps[6];    // Temperatures for next 18h
 bool  fRain[6];     // Rain flag for each interval
 int   fHours[6];    // Hour of the day (0-23) for X-axis labels
 bool  forecastLoaded = false;
+
+// ====== NEW: WORD OF THE DAY (WotD) ======
+String wotdWord = "Loading...";
+String wotdDef  = "";
+bool   wotdLoaded = false;
+unsigned long lastWotdFetch = 0;
+int  wotdContentHeight = 0; // <--- ADD THIS (Stores the total pixel height of the text)
+
+// ====== SETTINGS CONFIG ======
+
+// 1. LOCATIONS
+struct City {
+  const char* name;  // Display Name
+  const char* query; // API Query
+};
+
+const City myLocations[3] = {
+  { "Samarate", "Samarate,IT" },  // Example: Change these to your real preferences
+  { "Magenta",    "Magenta,IT" },
+  { "Zurigo",   "Zurich,CH" }
+};
+
+int locationIndex = 0; 
+
+// 2. LED MODES
+enum LedMode {
+  LED_OFF = 0,    
+  LED_ON,         
+  LED_BLINK       
+};
+
+int ledMode = LED_BLINK;      
+int defaultBlinkInterval = 1000;
+
+// ====== Settings Menu Logic ======
+enum SettingsState {
+  SET_MAIN = 0, // Top level: "Location", "LED Mode"
+  SET_LOC,      // Sub level: "Rome", "London", etc.
+  SET_LED,       // Sub level: "Off", "On", "Blink"
+  SET_BRT,      // <--- NEW: Add this line
+  SET_TIMEOUT   // <--- NEW: Add this line
+};
+
+SettingsState settingsState = SET_MAIN;
+int setMainIndex = 0; // Cursor for Top Level
+int setSubIndex  = 0; // Cursor for Sub Level
+
+// 3. BRIGHTNESS
+int lcdBrightness = 255; // 0-255 (Max)
+
+// 4. DISPLAY TIMEOUT
+enum DisplayTimeout {
+  DISP_ALWAYS_ON = 0,
+  DISP_15_SEC,
+  DISP_30_SEC,
+  DISP_60_SEC
+};
+int displayTimeoutMode = DISP_ALWAYS_ON;
+
+// Timing trackers
+unsigned long lastInteractionTime = 0; // Tracks last button/encoder use
+bool displayIsOff = false;
+
+// Hardware Pin (CHANGE THIS TO YOUR BOARD'S BACKLIGHT PIN)
+// For TTGO T-Display: 4
+// For standard ESP32 w/ TFT: Often 32 or 15
+#define TFT_BL 4  
+
+// ...
+
+int menuScrollY = 0; // Tracks the vertical scroll of the menu
 
 // ====== Pins ======
 #define TFT_CS   9
@@ -85,14 +154,12 @@ ScioSense_ENS160 ens160(0x53);   // ENS160 I2C address 0x53
 #define CYBER_DARK    0x4208
 #define RAIN 0x8cfe
 
-
 // --- NEW BACKGROUND COLORS (Dimmed for readability) ---
 #define BG_CLEAR      0x0000  // Keep Black for Clear (or use 0x0010 for very dark blue)
 #define BG_CLOUDS     0x2124  // Dark Grey
 #define BG_RAIN       0x0010  // Deep Navy Blue
 #define BG_SNOW       0x632C  // Cold Grey/Blue
 #define BG_THUNDER    0x2004  // Dark Purple/Grey
-
 
 #ifndef PI
 #define PI 3.1415926
@@ -105,11 +172,13 @@ enum UIMode {
   MODE_POMODORO,
   MODE_ALARM,
   MODE_DVD,
-  MODE_DAY_COUNTER
+  MODE_DAY_COUNTER,
+  MODE_SETTINGS,
+  MODE_WORD
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 5;       // Monitor, Pomodoro, Alarm, DVD, Day Counter
+const int MENU_ITEMS = 7;       // Monitor, Pomodoro, Alarm, DVD, Day Counter, Word of the day, Settings 
 
 // ====== Pomodoro ======
 enum PomoPhase {
@@ -205,18 +274,6 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 }
 
 // ========= Alarm icon =========
-/*
-void drawAlarmIcon() {
-  int x = 148;
-  tft.fillRect(x - 10, 0, 12, 12, CYBER_BG);
-  if (!alarmEnabled) return;
-
-  uint16_t c = CYBER_LIGHT; // cam
-  tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
-  tft.drawFastHLine(x - 8, 8, 8, c);
-  tft.fillCircle(x - 4, 10, 1, c);
-}*/
-// ========= Alarm icon =========
 // Now accepts a background color (defaults to Black if not specified)
 void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
   int x = 148;
@@ -231,9 +288,6 @@ void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
   tft.drawFastHLine(x - 8, 8, 8, c);
   tft.fillCircle(x - 4, 10, 1, c);
 }
-
-
-
 
 // This function runs ONLY if WiFi connection fails and AP mode starts
 void configModeCallback(WiFiManager *myWiFiManager) {
@@ -264,9 +318,7 @@ void configModeCallback(WiFiManager *myWiFiManager) {
   tft.println("   to input Pass");
 }
 
-
 // ========== HELPERS ==============
-
 
 // Load up to 3 saved networks from memory into WiFiMulti
 void loadWiFiList() {
@@ -333,12 +385,6 @@ void saveCurrentNetwork() {
   Serial.println("New Network Saved to Slot 0");
   prefs.end();
 }
-
-
-
-
-
-
 
 // ========= WiFi & Time =========
 void connectWiFiAndSyncTime() {
@@ -472,7 +518,6 @@ void connectWiFiAndSyncTime() {
     retry++;
   }
 }
-
 
 String getTimeStr(char type) {
   struct tm timeinfo;
@@ -668,36 +713,394 @@ void drawEnvDynamic(float temp, float hum, uint16_t tvoc, uint16_t eco2) {
                    ST77XX_WHITE);
 }
 
+// WORD OF THE DAY 
+// ====== WotD Helper Functions ======
+
+// Helper to replace Italian accents for standard display compatibility
+
+String fixAccents(String str) {
+  str.replace("&quot;", "\"");
+  str.replace("&rsquo;", "'");
+  str.replace("&#8217;", "'");
+  str.replace("&#8220;", "\""); 
+  str.replace("&#8221;", "\""); 
+  str.replace("&laquo;", "\""); // HTML Left Quote
+  str.replace("&raquo;", "\""); // HTML Right Quote
+
+  // UTF-8 Accents
+  str.replace("\xC3\xA0", "a'"); // à
+  str.replace("\xC3\xA8", "e'"); // è
+  str.replace("\xC3\xA9", "e'"); // é
+  str.replace("\xC3\xAC", "i'"); // ì
+  str.replace("\xC3\xB2", "o'"); // ò
+  str.replace("\xC3\xB9", "u'"); // ù
+  str.replace("\xC3\x80", "A'"); // À
+  str.replace("\xC3\x88", "E'"); // È
+  str.replace("\xC3\x89", "E'"); // É
+  
+  // Smart Quotes & Guillemets
+  str.replace("\xE2\x80\x98", "'"); 
+  str.replace("\xE2\x80\x99", "'"); 
+  str.replace("‘", "'"); 
+  str.replace("’", "'");
+  str.replace("\xC2\xAB", "\""); 
+  str.replace("\xC2\xBB", "\""); 
+  
+  return str;
+}
+
+String cleanHtml(String raw) {
+  String clean = "";
+  bool insideTag = false;
+  
+  // 1. Remove Tags
+  for (int i = 0; i < raw.length(); i++) {
+    char c = raw.charAt(i);
+    if (c == '<') {
+      insideTag = true;
+    } else if (c == '>') {
+      insideTag = false;
+      clean += " "; 
+    } else if (!insideTag) {
+      clean += c;
+    }
+  }
+  
+  // 2. Collapse spaces but KEEP Newlines
+  String finalStr = "";
+  bool spaceFound = false;
+  
+  for(int i=0; i<clean.length(); i++){
+    char c = clean.charAt(i);
+    if (c == '\n') { // Keep the newline!
+      finalStr += c;
+      spaceFound = false;
+    } 
+    else if(c == ' ' || c == '\r' || c == '\t'){
+      if(!spaceFound) {
+        finalStr += " ";
+        spaceFound = true;
+      }
+    } else {
+      finalStr += c;
+      spaceFound = false;
+    }
+  }
+  return finalStr;
+}
+
+void calculateContentHeight() {
+  // Logic matches drawWordScreen exactly to ensure sync
+  int cursorX = 10; 
+  int cursorY = 0; // Start at 0 to count pure height
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10; 
+        cursorY += lineHeight;
+      }
+      
+      cursorX += wordWidth;
+      
+      if (c == ' ') cursorX += 6; 
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+  // Add one last line height for the final row
+  wotdContentHeight = cursorY + lineHeight;
+}
+
+void fetchWordOfDay() {
+  if (WiFi.status() != WL_CONNECTED) {
+    wotdWord = "WiFi Disconnected";
+    wotdDef  = "Check connection.";
+    wotdLoaded = true;
+    return;
+  }
+
+  String url = "https://unaparolaalgiorno.it/"; 
+
+  HTTPClient http;
+  WiFiClientSecure client;
+  client.setInsecure(); 
+  
+  http.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)");
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  
+  http.begin(client, url);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    // 1. Find Word
+    int linkIndex = payload.indexOf("unaparolaalgiorno.it/significato/");
+    if (linkIndex == -1) linkIndex = payload.indexOf("/significato/");
+
+    if (linkIndex > 0) {
+       int wordStartTag = payload.indexOf(">", linkIndex);
+       int wordEndTag   = payload.indexOf("<", wordStartTag);
+       
+       String rawWord = payload.substring(wordStartTag + 1, wordEndTag);
+       rawWord.replace("LEGGI ", ""); 
+       wotdWord = fixAccents(cleanHtml(rawWord));
+
+       // 2. Find Definition
+       String searchArea = payload.substring(wordEndTag, wordEndTag + 3000);
+       
+       // Force Newlines on Block Tags
+       searchArea.replace("</div>", "\n");
+       searchArea.replace("</span>", "\n"); // Added span support
+       searchArea.replace("</p>",   "\n");
+       searchArea.replace("<br>",   "\n");
+       
+       // Force separation for the Example line
+       searchArea.replace("»", "»\n"); 
+       searchArea.replace("!", "!\n"); 
+       searchArea.replace("&raquo;", "»\n");
+
+       String cleanArea = cleanHtml(searchArea);
+       
+       String fullDefinition = "";
+       int cursor = 0;
+       bool stopReading = false;
+       
+       while (cursor < cleanArea.length() && !stopReading) {
+         int nextNewLine = cleanArea.indexOf('\n', cursor);
+         if (nextNewLine == -1) nextNewLine = cleanArea.length();
+         
+         String line = cleanArea.substring(cursor, nextNewLine);
+         
+         line = fixAccents(line);
+         line.trim();
+         
+         if (line.length() > 3) {
+           // STOP if we hit the "LEGGI" button
+           if (line.indexOf("LEGGI ") != -1 || line.indexOf("Leggi ") != -1) {
+             stopReading = true; 
+             continue; 
+           }
+
+           // --- UPDATED FILTER ---
+           // We ONLY filter out junk links. We KEEP quotes and "es."
+           bool isJunk = false;
+           
+           if (line.indexOf("unaparolaalgiorno") != -1) isJunk = true;
+
+           if (!isJunk) {
+              // Add double newline if we are appending to existing text
+              if (fullDefinition.length() > 0) fullDefinition += "\n\n";
+              fullDefinition += line;
+           }
+         }
+         cursor = nextNewLine + 1; 
+       }
+
+       if (fullDefinition.length() == 0) wotdDef = "Def not found.";
+       else wotdDef = fullDefinition;
+       
+       if (wotdDef.length() > 800) wotdDef = wotdDef.substring(0, 800) + "...";
+       calculateContentHeight();
+       wotdLoaded = true;
+       Serial.println("Word: " + wotdWord);
+    } else {
+      wotdWord = "Parse Error";
+      wotdDef  = "Link not found.";
+      wotdLoaded = true;
+    }
+  } else {
+    wotdWord = "HTTP Error";
+    wotdDef  = String(httpCode);
+    wotdLoaded = true;
+  }
+  http.end();
+}
+
+void drawWordScreen(int scrollOffset, bool fullRedraw) {
+  
+  // === CONFIG ===
+  // 35px is the "Safe Line". 
+  // Title sits above this. Scrolling text sits below this.
+  int headerLimit = 45; 
+
+  // --- PART 1: DRAW HEADER (Only on Full Redraw) ---
+  if (fullRedraw) {
+    tft.fillScreen(CYBER_BG);
+    
+    // Draw Title
+    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
+    tft.setTextSize(2);
+    
+    // Center the Title
+    int wLen = wotdWord.length() * 12;
+    int xPos = (160 - wLen) / 2;
+    if(xPos < 0) xPos = 0;
+    
+    tft.setCursor(xPos, 5); 
+    tft.print(wotdWord);
+    
+    // (Decorative line removed)
+    
+  } else {
+    // --- PART 2: SCROLL CLEARING ---
+    // Clear only the bottom area (Below 35px)
+    tft.fillRect(0, headerLimit, 160, 128 - headerLimit, CYBER_BG);
+  }
+
+  if (!wotdLoaded) {
+    tft.setCursor(10, 60);
+    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+    tft.print("Loading...");
+    return;
+  }
+
+  // --- PART 3: DRAW SCROLLING TEXT ---
+  tft.setTextWrap(false); 
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+
+  int startY = 45 - scrollOffset; 
+  int cursorX = 10; 
+  int cursorY = startY;
+  int lineHeight = 10;
+  int rightMargin = 155; 
+  
+  String currentWord = "";
+  
+  for (int i = 0; i < wotdDef.length(); i++) {
+    char c = wotdDef.charAt(i);
+    
+    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
+      if (c != ' ' && c != '\n') currentWord += c;
+      
+      int wordWidth = currentWord.length() * 6; 
+      
+      if (cursorX + wordWidth > rightMargin) {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      
+      // === DRAWING CHECK ===
+      // Only draw if text is BELOW the header limit (35)
+      if (currentWord.length() > 0) {
+        if (cursorY >= headerLimit && cursorY < 128) {
+           tft.setCursor(cursorX, cursorY);
+           tft.print(currentWord);
+        }
+      }
+      
+      cursorX += wordWidth;
+      if (c == ' ') cursorX += 6;
+      else if (c == '\n') {
+        cursorX = 10;
+        cursorY += lineHeight;
+      }
+      currentWord = "";
+    } else {
+      currentWord += c;
+    }
+  }
+
+  // (Arrows removed completely)
+}
+
 // ========= Menu UI =========
 void drawMenu() {
   tft.fillScreen(CYBER_BG);
 
-  tft.setTextSize(1);
-  tft.setTextColor(CYBER_LIGHT);
-  tft.setCursor(10, 10);
-  tft.print("MODE SELECT");
-
-  const char* items[MENU_ITEMS] = {
+  // --- 1. Define Layout ---
+  const int ITEM_HEIGHT   = 18;
+  const int HEADER_HEIGHT = 35; // The "Safe Zone" at the top
+  const int VISIBLE_H     = 128 - HEADER_HEIGHT;
+  
+  const char* items[] = {
     "Monitor",
     "Pomodoro",
     "Alarm",
     "DVD",
-    "Day Counter"
+    "Day Counter",
+    "Word of Day",
+    "Settings"
   };
 
+  // --- 2. DRAW HEADER FIRST (Static Layer) ---
+  // We draw this first so it establishes the "do not touch" zone.
+  tft.fillRect(0, 0, 160, HEADER_HEIGHT, CYBER_BG);
+  
+  tft.setTextColor(CYBER_LIGHT, CYBER_BG);
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  tft.print("MODE SELECT");
+  drawAlarmIcon();
+
+  // --- 3. Auto-Scroll Logic ---
+  int selectionY = menuIndex * ITEM_HEIGHT;
+  int margin = ITEM_HEIGHT; 
+  
+  // Scroll Down
+  if (selectionY < menuScrollY + margin) {
+     menuScrollY = selectionY - margin;
+  }
+  // Scroll Up
+  if (selectionY + ITEM_HEIGHT > menuScrollY + VISIBLE_H - margin) {
+     menuScrollY = (selectionY + ITEM_HEIGHT) - (VISIBLE_H - margin);
+  }
+  
+  // Clamp
+  int totalListHeight = MENU_ITEMS * ITEM_HEIGHT;
+  int maxScroll = totalListHeight - VISIBLE_H + margin; 
+  if (maxScroll < 0) maxScroll = 0;
+  if (menuScrollY < 0) menuScrollY = 0;
+  if (menuScrollY > maxScroll) menuScrollY = maxScroll;
+
+
+  // --- 4. Draw Items (The Flicker Fix) ---
+  int startY = HEADER_HEIGHT - menuScrollY;
+
+  tft.setTextSize(1);
+  
   for (int i = 0; i < MENU_ITEMS; i++) {
-    int y = 32 + i * 18;
+    int y = startY + (i * ITEM_HEIGHT);
+    
+    // === CRITICAL FIX ===
+    // If the item's position is inside the Header Area, DO NOT DRAW IT.
+    // This prevents the "draw then cover" flicker.
+    if (y < HEADER_HEIGHT) continue; 
+    
+    // Also skip if it's off the bottom of the screen
+    if (y > 128) continue;
+
+    // Now it is safe to draw
     if (i == menuIndex) {
       tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
       tft.setTextColor(CYBER_BG);
     } else {
-      tft.fillRect(6, y - 2, 148, 14, CYBER_BG);
+      tft.fillRect(6, y - 2, 148, 14, CYBER_BG); 
       tft.setTextColor(ST77XX_WHITE);
     }
+    
     tft.setCursor(12, y);
-    tft.print(items[i]);
+    tft.print(items[i]); 
   }
-  drawAlarmIcon();
+
+  // Optional: Draw Scroll Arrows (Safe to draw last as they are small)
+  if (menuScrollY > 0) tft.fillTriangle(150, 20, 154, 24, 146, 24, CYBER_ACCENT);
+  if (menuScrollY < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
 }
 
 // ========= Pomodoro =========
@@ -869,32 +1272,43 @@ void checkAlarmTrigger() {
 
 // ========= Alert visual + audio =========
 void updateAlertStateAndLED() {
-  if (alarmRinging) currentAlertLevel = ALERT_ALARM;
-  else if (curECO2 > 1800) currentAlertLevel = ALERT_CO2;
-  else currentAlertLevel = ALERT_NONE;
-
   unsigned long now = millis();
 
-  unsigned long interval;
-  if (currentAlertLevel == ALERT_ALARM)      interval = 120;
-  else if (currentAlertLevel == ALERT_CO2)   interval = 250;
-  else                                       interval = 1000;
+  // 1. Handle LED based on Mode
+  if (ledMode == LED_OFF) {
+    digitalWrite(LED_PIN, LOW);
+  } 
+  else if (ledMode == LED_ON) {
+    digitalWrite(LED_PIN, HIGH);
+  } 
+  else {
+    // --- MODE: BLINKING ---
+    if (alarmRinging) currentAlertLevel = ALERT_ALARM;
+    else if (curECO2 > 1800) currentAlertLevel = ALERT_CO2;
+    else currentAlertLevel = ALERT_NONE;
 
-  if (now - lastLedToggleMs > interval) {
-    lastLedToggleMs = now;
-    ledState = !ledState;
-    digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    unsigned long interval;
+    if (currentAlertLevel == ALERT_ALARM)      interval = 120;
+    else if (currentAlertLevel == ALERT_CO2)   interval = 250;
+    else                                       interval = defaultBlinkInterval; 
+
+    if (now - lastLedToggleMs > interval) {
+      lastLedToggleMs = now;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+    }
   }
 
-  if (currentAlertLevel == ALERT_CO2) {
-    if (now - lastCo2BlinkMs > 350) {
+  // 2. Audio/CO2 Warning (Independent of LED)
+  if (curECO2 > 1800) {
+     if (now - lastCo2BlinkMs > 350) {
       lastCo2BlinkMs = now;
       co2BlinkOn = !co2BlinkOn;
       uint16_t baseCol = colorForCO2(curECO2);
       uint16_t col = co2BlinkOn ? baseCol : CYBER_DARK;
       drawCO2Value(curECO2, col);
       tone(BUZZ_PIN, 1800, 80);
-    }
+     }
   }
 }
 
@@ -1031,75 +1445,6 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
 }
 
 //========= WHEATER STUF ===========
-/*
-void fetchWeather() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  WiFiClient client;
-  HTTPClient http;
-  
-  // We still fetch the forecast
-  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
-  
-  http.begin(client, url);
-  int httpCode = http.GET();
-
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    
-    // Filter to save memory
-    JsonDocument filter;
-    filter["list"][0]["dt"] = true;
-    filter["list"][0]["main"]["temp"] = true;
-    filter["list"][0]["weather"][0]["main"] = true;
-    filter["city"]["timezone"] = true;
-
-    JsonDocument doc; 
-    DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-
-    if (!error) {
-      long timezone = doc["city"]["timezone"];
-      
-      // --- POINT 0: CURRENT WEATHER (NOW) ---
-      // We use the global 'outTemp' we fetched earlier (or use 1st forecast slot as proxy if needed)
-      // Note: Best practice is to assume fetchWeather updates outTemp first. 
-      // If outTemp is 0 (first run), we'll trust the first forecast slot.
-      if (outTemp == 0) outTemp = doc["list"][0]["main"]["temp"];
-      
-      fTemps[0] = outTemp;
-      fRain[0]  = (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0 || outDesc.indexOf("Thunder") >= 0);
-      
-      // Get current local hour
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo)) {
-        fHours[0] = timeinfo.tm_hour;
-      } else {
-        fHours[0] = 0; 
-      }
-
-      // --- POINTS 1-5: FORECAST (Next 15 hours) ---
-      for(int i=0; i<5; i++) {
-        fTemps[i+1] = doc["list"][i]["main"]["temp"];
-        
-        const char* w = doc["list"][i]["weather"][0]["main"];
-        String cond = String(w);
-        fRain[i+1] = (cond.indexOf("Rain") >= 0 || cond.indexOf("Drizzle") >= 0 || cond.indexOf("Thunder") >= 0);
-
-        // Calculate Hour
-        unsigned long dt = doc["list"][i]["dt"];
-        time_t rawTime = (time_t)(dt + timezone); 
-        struct tm* ti = gmtime(&rawTime);   
-        fHours[i+1] = ti->tm_hour;
-      }
-      
-      weatherLoaded = true;
-      forecastLoaded = true;
-      Serial.println("Forecast Updated (Start=Now).");
-    }
-  }
-  http.end();
-}
-*/
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1107,7 +1452,9 @@ void fetchWeather() {
   HTTPClient http;
   
   // URL: Get 5-day forecast (we use the first few slots)
-  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
+  
+  String q = myLocations[locationIndex].query;
+  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + q + "&appid=" + weatherKey + "&units=metric&cnt=6";
   
   http.begin(client, url);
   int httpCode = http.GET();
@@ -1183,63 +1530,16 @@ void fetchWeather() {
   http.end();
 }
 
-/*
-void drawWeatherScreen() {
-  tft.fillScreen(CYBER_BG);
-  
-  // Header
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(10, 5);
-  tft.print("METEO for "); 
-  tft.print(city);
-  
-  if (!weatherLoaded) {
-    tft.setCursor(20, 60);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print("Loading...");
-    return;
-  }
-
-  // Draw Big Temperature
-  tft.setTextSize(3);
-  tft.setTextColor(CYBER_ACCENT);
-  tft.setCursor(30, 40);
-  tft.print(outTemp, 1);
-  tft.setTextSize(1);
-  tft.print(" C");
-
-  // Draw Condition (Rain/Clear/etc)
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  int descW = outDesc.length() * 12;
-  tft.setCursor((160 - descW) / 2, 80);
-  tft.print(outDesc);
-
-  // Draw Humidity
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(40, 110);
-  tft.print("Humidity: ");
-  tft.print(outHum);
-  tft.print("%");
-  
-  drawAlarmIcon();
-}
-*/ 
-
 void drawWeatherScreen() {
   // 1. Determine Background based on Condition
   uint16_t bgCol = CYBER_BG; // Default Black
-  uint16_t txtCol = ST77XX_WHITE;
   
   if (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0) {
     bgCol = BG_RAIN; 
   } else if (outDesc.indexOf("Cloud") >= 0 || outDesc.indexOf("Mist") >= 0 || outDesc.indexOf("Fog") >= 0) {
     bgCol = BG_CLOUDS;
   } else if (outDesc.indexOf("Snow") >= 0) {
-    bgCol = ST77XX_WHITE;
-    txtCol = ST77XX_BLACK;
+    bgCol = BG_SNOW;
   } else if (outDesc.indexOf("Thunder") >= 0) {
     bgCol = BG_THUNDER;
   } else if (outDesc.indexOf("Clear") >= 0) {
@@ -1249,11 +1549,14 @@ void drawWeatherScreen() {
   tft.fillScreen(bgCol);
   
   // 2. Header (Top Left)
-  tft.setTextColor(txtCol, bgCol);
+  tft.setTextColor(ST77XX_WHITE, bgCol);
   tft.setTextSize(1);
   tft.setCursor(10, 5);
   tft.print("METEO: "); 
-  tft.print(city);
+  
+  // --- FIX: USE DYNAMIC NAME FROM SETTINGS ---
+  tft.print(myLocations[locationIndex].name); 
+  // ------------------------------------------
   
   if (!weatherLoaded) {
     tft.setCursor(10, 60);
@@ -1264,29 +1567,27 @@ void drawWeatherScreen() {
 
   // 3. Big Temperature (Left Aligned)
   tft.setTextSize(3);
-  tft.setTextColor(txtCol, bgCol); // Cyan text on colored BG
-  tft.setCursor(10, 35);                 // Moved to Left
+  tft.setTextColor(ST77XX_WHITE, bgCol); 
+  tft.setCursor(10, 35);                 
   tft.print(outTemp, 1);
   tft.setTextSize(1);
   tft.print(" C");
 
   // 4. Weather Condition Text (Left Aligned)
   tft.setTextSize(2);
-  tft.setTextColor(txtCol, bgCol); // White text is safest on colors
-  tft.setCursor(10, 70);                 // Moved to Left
+  tft.setTextColor(ST77XX_WHITE, bgCol); 
+  tft.setCursor(10, 70);                 
   tft.print(outDesc);
 
   // 5. Humidity (Left Aligned)
   tft.setTextSize(1);
-  tft.setTextColor(txtCol, bgCol);
-  tft.setCursor(10, 100);                // Moved to Left
+  tft.setTextColor(ST77XX_WHITE, bgCol);
+  tft.setCursor(10, 100);                
   tft.print("Humidity: ");
   tft.print(outHum);
   tft.print("%");
   
-  // Optional: Redraw Alarm Icon since fillScreen wiped it
-  // (We need to update drawAlarmIcon to accept a bg color if we want it perfect, 
-  // but for now, this works if the icon area is black or transparent)
+  // 6. Draw Alarm Icon (passing the background color)
   drawAlarmIcon(bgCol); 
 }
 
@@ -1607,11 +1908,84 @@ void drawYearCircle(int dayIdx, int totalDays) {
   tft.print(dayOfMonth + 1);
 }
 
+void loadSettings() {
+  prefs.begin("cyber-conf", true); // Open "cyber-conf" namespace (Read Only)
+  
+  locationIndex = prefs.getInt("locIdx", 0);
+  ledMode       = prefs.getInt("ledMode", LED_BLINK);
+  
+  // Safety check
+  if (locationIndex < 0 || locationIndex > 2) locationIndex = 0;
+  lcdBrightness      = prefs.getInt("brt", 255);        // Default Max
+  displayTimeoutMode = prefs.getInt("timeout", DISP_ALWAYS_ON);
+  prefs.end();
+}
+
+void saveSettings() {
+  prefs.begin("cyber-conf", false); // Open "cyber-conf" namespace (Read/Write)
+  
+  prefs.putInt("locIdx", locationIndex);
+  prefs.putInt("ledMode", ledMode);
+  prefs.putInt("brt", lcdBrightness);
+  prefs.putInt("timeout", displayTimeoutMode);
+  prefs.end();
+  
+  // Reset flags so the new location is fetched immediately
+  weatherLoaded = false; 
+  forecastLoaded = false;
+}
+
+
+// Generic function to draw ANY list menu (Main, Settings, Sub-settings)
+void drawListMenu(const char* title, const char* items[], int count, int selIndex) {
+  tft.fillScreen(CYBER_BG);
+
+  // Title
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(10, 10);
+  tft.print(title);
+
+  // Draw List Items
+  for (int i = 0; i < count; i++) {
+    int y = 32 + i * 18; // Spacing logic from your original menu
+    
+    if (i == selIndex) {
+      // Selected: Cyan Bar + Black Text
+      tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
+      tft.setTextColor(CYBER_BG);
+    } else {
+      // Unselected: Black BG + White Text
+      tft.fillRect(6, y - 2, 148, 14, CYBER_BG);
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    
+    tft.setCursor(12, y);
+    tft.print(items[i]);
+  }
+  
+  // Optional: Draw Icons if needed
+  drawAlarmIcon(); 
+}
+
+void setScreenBrightness(int val) {
+  // In ESP32 Core 3.0+, we write to the PIN, not the channel
+  // val is 0-255
+  if (val < 5) val = 5; // Safety minimum
+  ledcWrite(TFT_BL, val);
+}
 
 // ========= SETUP =========
 void setup() {
   Serial.begin(115200);
+  loadSettings();
   delay(1500);
+
+  pinMode(TFT_BL, OUTPUT);
+
+  ledcAttach(TFT_BL, 5000, 8); // 5000 Hz, 8-bit resolution
+  
+  setScreenBrightness(lcdBrightness); // Apply saved brightness
 
   pinMode(ENC_A_PIN,   INPUT_PULLUP);
   pinMode(ENC_B_PIN,   INPUT_PULLUP);
@@ -1645,10 +2019,38 @@ void setup() {
 
 // ========= LOOP =========
 void loop() {
-
+  // 1. Read Inputs
   int encStep     = readEncoderStep();
   bool encPressed = checkButtonPressed(ENC_BTN_PIN, lastEncBtn);
   bool k0Pressed  = checkButtonPressed(KEY0_PIN,    lastKey0);
+
+  // --- HANDLE SCREEN TIMEOUT & WAKE ---
+  // If any input is detected, reset the timer and wake the screen
+  if (encStep != 0 || encPressed || k0Pressed) {
+    lastInteractionTime = millis();
+    if (displayIsOff) {
+      displayIsOff = false;
+      setScreenBrightness(lcdBrightness); // Restore saved brightness
+      
+      // Optional: Consume the click so it wakes the screen but doesn't trigger an action immediately
+      // If you prefer the first click to also do something, remove the line below.
+      if (encPressed) encPressed = false; 
+    }
+  }
+
+  // Check if we need to turn the screen off
+  if (!displayIsOff && displayTimeoutMode != DISP_ALWAYS_ON) {
+    unsigned long timeoutMs = 0;
+    if (displayTimeoutMode == DISP_15_SEC) timeoutMs = 15000;
+    else if (displayTimeoutMode == DISP_30_SEC) timeoutMs = 30000;
+    else if (displayTimeoutMode == DISP_60_SEC) timeoutMs = 60000;
+    
+    if (millis() - lastInteractionTime > timeoutMs) {
+      displayIsOff = true;
+      setScreenBrightness(0); // Turn OFF backlight
+    }
+  }
+  // ------------------------------------
 
   checkAlarmTrigger();
   updateAlertStateAndLED();
@@ -1669,7 +2071,7 @@ void loop() {
           updateEnvSensors(true);
           drawClockTime(getTimeStr('H'), getTimeStr('M'), getTimeStr('S'));
           drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
-        } else if (menuIndex == 1) {
+        } else if (menuIndex == 1) { // POMODORO Selected
           currentMode = MODE_POMODORO;
           
           // Reset or Keep state? 
@@ -1687,6 +2089,24 @@ void loop() {
           dvdInited = false;
         } else if (menuIndex == 4) {
           currentMode = MODE_DAY_COUNTER;
+        } else if (menuIndex == 5) { // Word of Day
+          currentMode = MODE_WORD;
+          // Fetch only if never loaded or stale (> 4 hours)
+          if (!wotdLoaded || millis() - lastWotdFetch > 14400000) {
+          tft.fillScreen(CYBER_BG);
+          tft.setCursor(10,60); tft.print("Fetching...");
+          fetchWordOfDay();
+          lastWotdFetch = millis();
+          }
+          drawWordScreen(0,true);
+        } else if (menuIndex == 6) { // Settings
+          currentMode = MODE_SETTINGS;
+          settingsState = SET_MAIN; // Always start at top
+          setMainIndex = 0;         // Reset cursor
+          
+          // Draw the initial screen immediately
+          const char* initialItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", initialItems, 4, 0);
         }
       }
       break;
@@ -1710,8 +2130,7 @@ void loop() {
         tft.fillScreen(CYBER_BG);
         
         if (clockPage == 0) {
-          // --- PAGE 0: MONITOR (INSTANT LOAD) ---
-          // We do NOT fetch weather here.
+          // --- PAGE 0: MONITOR ---
           initClockStaticUI();
           prevTimeStr = ""; 
           updateEnvSensors(true); 
@@ -1719,18 +2138,17 @@ void loop() {
           drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
         } 
         else if (clockPage == 1) {
-          // --- PAGE 1: WEATHER (FETCH ONLY HERE) ---
-          // Only fetch if we haven't yet, or if data is old (>15 mins)
+          // --- PAGE 1: WEATHER ---
           if (!weatherLoaded || millis() - lastWeatherFetch > 900000) {
              tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Weather...");
-             fetchWeather(); // <--- This takes 1-2 seconds
+             fetchWeather(); 
              lastWeatherFetch = millis();
-             tft.fillScreen(CYBER_BG); // Clear "Fetching" text
+             tft.fillScreen(CYBER_BG); 
           }
           drawWeatherScreen();
         }
         else {
-          // --- PAGE 2: GRAPH (FETCH ONLY HERE) ---
+          // --- PAGE 2: GRAPH ---
           if (!forecastLoaded || millis() - lastWeatherFetch > 900000) { 
              tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Forecast...");
              fetchWeather(); 
@@ -1741,9 +2159,8 @@ void loop() {
         }
       }
 
-      // 3. Update Loop (Refreshes data while staying on the page)
+      // 3. Update Loop
       if (clockPage == 0) {
-        // --- Monitor Update ---
         struct tm timeinfo;
         if (getLocalTime(&timeinfo)) {
           int sec = timeinfo.tm_sec;
@@ -1758,7 +2175,7 @@ void loop() {
         }
       } 
       else {
-        // --- Weather/Graph Auto-Refresh (every 15 mins) ---
+        // Auto-Refresh Weather/Graph every 15 mins
         if (millis() - lastWeatherFetch > 900000) { 
           fetchWeather();
           lastWeatherFetch = millis();
@@ -1770,7 +2187,7 @@ void loop() {
       // 4. Exit to Menu
       if (k0Pressed) {
         currentMode = MODE_MENU;
-        clockPage = 0; // Reset to Monitor for next time
+        clockPage = 0; 
         prevClockPage = -1; 
         drawMenu();
       }
@@ -1937,10 +2354,7 @@ void loop() {
           alarmEnabled = !alarmEnabled;
           changed = true;
         }
-
-        if (changed) {
-          lastAlarmDayTriggered = -1;
-        }
+        if (changed) lastAlarmDayTriggered = -1;
       }
 
       if (encPressed) {
@@ -1958,7 +2372,6 @@ void loop() {
         drawAlarmScreen(false);
         drawAlarmIcon();
       }
-
       break;
     }
 
@@ -1970,6 +2383,209 @@ void loop() {
       break;
     }
 
+    case MODE_SETTINGS: {
+      // --- STATE 1: TOP LEVEL ---
+      if (settingsState == SET_MAIN) {
+        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" }; 
+        bool changed = false;
+
+        // Navigation
+        if (encStep != 0) {
+          setMainIndex += encStep;
+          if (setMainIndex < 0) setMainIndex = 3;
+          if (setMainIndex > 3) setMainIndex = 0;
+          changed = true;
+        }
+
+        // Enter Sub-Menu
+        if (encPressed) {
+          if (setMainIndex == 0) {
+             settingsState = SET_LOC;
+             setSubIndex = locationIndex; 
+             const char* items[] = { myLocations[0].name, myLocations[1].name, myLocations[2].name };
+             drawListMenu("SELECT CITY", items, 3, setSubIndex);
+          } else if (setMainIndex == 1) {
+             settingsState = SET_LED;
+             setSubIndex = ledMode;
+             const char* items[] = { "Always Off", "Always On", "Blinking" };
+             drawListMenu("LED MODE", items, 3, setSubIndex);
+          } else if (setMainIndex == 2) {
+             // BRIGHTNESS (Slider Logic)
+             settingsState = SET_BRT;
+             tft.fillScreen(CYBER_BG);
+             tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
+             tft.setCursor(60, 60); tft.setTextSize(3); tft.print(lcdBrightness);
+          } else {
+             // TIMEOUT
+             settingsState = SET_TIMEOUT;
+             setSubIndex = displayTimeoutMode;
+             const char* items[] = { "Always On", "15 Seconds", "30 Seconds", "60 Seconds" };
+             drawListMenu("TIMEOUT", items, 4, setSubIndex);
+          }
+          return; 
+        }
+
+        if (changed) drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+      } 
+      
+      // --- STATE 2: LOCATION SUB-MENU ---
+      else if (settingsState == SET_LOC) {
+        const char* locItems[] = { myLocations[0].name, myLocations[1].name, myLocations[2].name };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 2;
+          if (setSubIndex > 2) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (locationIndex != setSubIndex) {
+            locationIndex = setSubIndex;
+            saveSettings(); 
+            tone(BUZZ_PIN, 2000, 100); 
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("SELECT CITY", locItems, 3, setSubIndex);
+      } 
+
+      // --- STATE 3: LED SUB-MENU ---
+      else if (settingsState == SET_LED) {
+        const char* ledItems[] = { "Always Off", "Always On", "Blinking" };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 2;
+          if (setSubIndex > 2) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (ledMode != setSubIndex) {
+            ledMode = setSubIndex;
+            saveSettings();
+            tone(BUZZ_PIN, 2000, 100);
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("LED MODE", ledItems, 3, setSubIndex);
+      }
+
+      // --- STATE 4: BRIGHTNESS ---
+      else if (settingsState == SET_BRT) {
+        if (encStep != 0) {
+          lcdBrightness += (encStep * 25); 
+          if (lcdBrightness > 255) lcdBrightness = 255;
+          if (lcdBrightness < 5)   lcdBrightness = 5; 
+          
+          setScreenBrightness(lcdBrightness); 
+          
+          // Redraw Value
+          tft.fillScreen(CYBER_BG);
+          tft.setTextSize(1); tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
+          tft.setTextSize(3); tft.setCursor(50, 60); tft.setTextColor(ST77XX_WHITE);
+          tft.print(map(lcdBrightness, 0, 255, 0, 100)); tft.print("%");
+        }
+
+        if (encPressed) {
+          saveSettings();
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+      }
+
+      // --- STATE 5: TIMEOUT ---
+      else if (settingsState == SET_TIMEOUT) {
+        const char* tItems[] = { "Always On", "15 Seconds", "30 Seconds", "60 Seconds" };
+        bool changed = false;
+
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 3;
+          if (setSubIndex > 3) setSubIndex = 0;
+          changed = true;
+        }
+
+        if (encPressed) {
+          if (displayTimeoutMode != setSubIndex) {
+            displayTimeoutMode = setSubIndex;
+            saveSettings();
+            tone(BUZZ_PIN, 2000, 100);
+          }
+          // Auto-Back to Main
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          return;
+        }
+        if (changed) drawListMenu("TIMEOUT", tItems, 4, setSubIndex);
+      }
+      
+      // --- EXIT / BACK LOGIC (K0 Button) ---
+      if (k0Pressed) {
+        if (settingsState != SET_MAIN) {
+          // If in sub-menu, cancel and go back
+          settingsState = SET_MAIN;
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+        } else {
+          // If in Main Settings, exit to Clock Menu
+          currentMode = MODE_MENU;
+          drawMenu();
+        }
+      }
+      break;
+    } case MODE_WORD: {
+      static int wordScroll = 0;
+      
+      if (encStep != 0) {
+        wordScroll += (encStep * 10);
+        if (wordScroll < 0) wordScroll = 0;
+        
+        // --- DYNAMIC SCROLL LIMIT ---
+        // Viewport height is approx 90px (128 screen - 35 top margin)
+        // Max Scroll = Total Text Height - Viewport Height + Padding
+        int maxScroll = wotdContentHeight - 90 + 20; 
+        if (maxScroll < 0) maxScroll = 0;
+        
+        if (wordScroll > maxScroll) wordScroll = maxScroll;
+        
+        drawWordScreen(wordScroll,false);
+      }
+
+      // Refresh
+      if (encPressed) {
+        tft.fillScreen(CYBER_BG);
+        tft.setTextSize(1);
+        tft.setCursor(50, 60); tft.setTextColor(CYBER_ACCENT); 
+        tft.print("Reloading...");
+        fetchWordOfDay();
+        lastWotdFetch = millis();
+        wordScroll = 0;
+        drawWordScreen(0,true);
+      }
+
+      // Exit
+      if (k0Pressed) {
+        currentMode = MODE_MENU;
+        drawMenu();
+      }
+      break;
+    }
+  
     case MODE_DAY_COUNTER: {
       static int viewPage = 0;      // 0 = Grid, 1 = Circle
       static int prevViewPage = -1; // Force initial draw
