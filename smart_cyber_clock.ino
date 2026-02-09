@@ -1,6 +1,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
@@ -8,22 +8,67 @@
 #include <Adafruit_AHTX0.h>
 #include <ScioSense_ENS160.h>
 #include "time.h"
-
-
-// --- NEW LIBRARIES FOR MULTI-WIFI ---
+#include "secrets.h"
+#include <HTTPUpdate.h>
 #include <WiFiMulti.h>
 #include <Preferences.h>
 
 WiFiMulti wifiMulti;
 Preferences prefs;
-// ------------------------------------
-
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
+// ==========================================
+// ======== HARDWARE CONFIGURATION ==========
+// ==========================================
+// CHANGE THIS VARIABLE:
+// 1 = Original (BLK=10, A=20, B=21, Buttons=Analog 0)
+// 2 = New (BLK=VCC, A=10, B=20, EncBtn=21, K0=0)
+#define HARDWARE_VERSION  1
+// ==========================================
+
+// ====== FIXED PINS (Unchanged) ======
+#define TFT_CS   9
+#define TFT_DC   8
+#define TFT_RST  7
+#define TFT_MOSI 6
+#define TFT_SCLK 5
+#define SDA_PIN  1
+#define SCL_PIN  2
+#define LED_PIN  4
+#define BUZZ_PIN 3
+
+// ====== VERSION SPECIFIC PIN MAPPING ======
+#if HARDWARE_VERSION == 1
+  // --- VERSION 1: ANALOG BUTTONS + PWM BACKLIGHT ---
+  #define TFT_BL       10  // PWM Controlled Backlight
+  #define ENC_A_PIN    20
+  #define ENC_B_PIN    21
+  
+  // Buttons (Analog Mux)
+  #define BTN_PIN      0   
+  // (Digital pins not used for buttons in V1)
+  #define ENC_BTN_PIN  -1  
+  #define KEY0_PIN     -1
+
+#else
+  // --- VERSION 2: DIGITAL BUTTONS + FIXED BACKLIGHT ---
+  #define TFT_BL       -1  // Not used (Connected to VCC)
+  #define ENC_A_PIN    10
+  #define ENC_B_PIN    20
+  
+  // Buttons (Digital Direct)
+  #define ENC_BTN_PIN  21  // Encoder Click
+  #define KEY0_PIN     0   // KO / Back Button
+  #define BTN_PIN      -1  // Analog pin not used
+#endif
+
 // ====== Weather Settings ======
-String weatherKey = "92ceeffbe3f1b5c8e4b83df88fa92d8c"; // PASTE KEY HERE
-String city       = "Samarate,IT";                     // YOUR CITY (e.g. "London,UK")
+// ... (The rest of your code continues normally from here)
+
+// ====== Weather Settings ======
+String weatherKey = WEATHER_API_KEY;
+String city       = WEATHER_API_CITY;
 
 // Variables to store data
 float outTemp = 0.0;
@@ -32,50 +77,35 @@ String outDesc = "--";
 unsigned long lastWeatherFetch = 0;
 bool weatherLoaded = false;
 
-
 // ====== WiFi & Time config ======
-
 const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec      = 1 * 3600;   // GMT+1
+const long  gmtOffset_sec      = 1 * 3600;
 const int   daylightOffset_sec = 0;
 
-
-
 // ====== Forecast Data ======
-float fTemps[6];    // Temperatures for next 18h
-bool  fRain[6];     // Rain flag for each interval
-int   fHours[6];    // Hour of the day (0-23) for X-axis labels
+float fTemps[6];
+bool  fRain[6];    
+int   fHours[6];
 bool  forecastLoaded = false;
-
-
-
-
-
-
-
 
 // ====== NEW: WORD OF THE DAY (WotD) ======
 String wotdWord = "Loading...";
 String wotdDef  = "";
 bool   wotdLoaded = false;
 unsigned long lastWotdFetch = 0;
-int  wotdContentHeight = 0; // <--- ADD THIS (Stores the total pixel height of the text)
-
+int  wotdContentHeight = 0;
 
 // ====== SETTINGS CONFIG ======
-
 // 1. LOCATIONS
 struct City {
-  const char* name;  // Display Name
-  const char* query; // API Query
+  const char* name;
+  const char* query; 
 };
-
 const City myLocations[3] = {
-  { "Samarate", "Samarate,IT" },  // Example: Change these to your real preferences
+  { "Samarate", "Samarate,IT" },  
   { "Magenta",    "Magenta,IT" },
   { "Zurigo",   "Zurich,CH" }
 };
-
 int locationIndex = 0; 
 
 // 2. LED MODES
@@ -84,31 +114,24 @@ enum LedMode {
   LED_ON,         
   LED_BLINK       
 };
-
 int ledMode = LED_BLINK;      
 int defaultBlinkInterval = 1000;
 
-
-
 // ====== Settings Menu Logic ======
 enum SettingsState {
-  SET_MAIN = 0, // Top level: "Location", "LED Mode"
-  SET_LOC,      // Sub level: "Rome", "London", etc.
-  SET_LED,       // Sub level: "Off", "On", "Blink"
-  SET_BRT,      // <--- NEW: Add this line
-  SET_TIMEOUT   // <--- NEW: Add this line
+  SET_MAIN = 0, 
+  SET_LOC,      
+  SET_LED,       
+  SET_BRT,      
+  SET_TIMEOUT,   
+  SET_WIFI
 };
-
 SettingsState settingsState = SET_MAIN;
-int setMainIndex = 0; // Cursor for Top Level
-int setSubIndex  = 0; // Cursor for Sub Level
-
-
-
-
+int setMainIndex = 0; 
+int setSubIndex  = 0;
 
 // 3. BRIGHTNESS
-int lcdBrightness = 255; // 0-255 (Max)
+int lcdBrightness = 255;
 
 // 4. DISPLAY TIMEOUT
 enum DisplayTimeout {
@@ -120,36 +143,67 @@ enum DisplayTimeout {
 int displayTimeoutMode = DISP_ALWAYS_ON;
 
 // Timing trackers
-unsigned long lastInteractionTime = 0; // Tracks last button/encoder use
+unsigned long lastInteractionTime = 0; 
 bool displayIsOff = false;
+#define TFT_BL 10  
 
-// Hardware Pin (CHANGE THIS TO YOUR BOARD'S BACKLIGHT PIN)
-// For TTGO T-Display: 4
-// For standard ESP32 w/ TFT: Often 32 or 15
-#define TFT_BL 4  
+int menuScrollY = 0;
+int settingsMenuScroll = 0;
 
-// ...
+// BUTTON STATES
+#define STATE_NONE 0
+#define STATE_PUSH 1
+#define STATE_K0   2
 
-int menuScrollY = 0; // Tracks the vertical scroll of the menu
+int lastBtnState = STATE_NONE;
+unsigned long lastDebounceTime = 0;
+const int DEBOUNCE_DELAY = 50;
+
+// ---------------------------------------------------------
+// --- UNIFIED BUTTON READING LOGIC (New Helper Function) ---
+// ---------------------------------------------------------
+int getRawInputState() {
+  #if HARDWARE_VERSION == 1
+    // --- ORIGINAL ANALOG LOGIC ---
+    int val = analogRead(BTN_PIN);
+    if (val < 800) return STATE_PUSH;
+    if (val > 1200 && val < 3100) return STATE_K0;
+    return STATE_NONE;
+
+  #else
+    // --- NEW DIGITAL LOGIC ---
+    // Assuming INPUT_PULLUP: LOW = Pressed, HIGH = Released
+    if (digitalRead(ENC_BTN_PIN) == LOW) return STATE_PUSH;
+    if (digitalRead(KEY0_PIN) == LOW)    return STATE_K0;
+    return STATE_NONE;
+  #endif
+}
+// ---------------------------------------------------------
 
 
-// ====== Pins ======
-#define TFT_CS   9
-#define TFT_DC   8
-#define TFT_RST  7
-#define TFT_MOSI 6
-#define TFT_SCLK 5
+// Helper to read inputs based on Hardware Version
+int readAnalogButtonState() {
+  #if HARDWARE_VERSION == 1
+    // --- VERSION 1: ANALOG LOGIC (Pin 0) ---
+    int val = analogRead(BTN_PIN);
+    if (val < 800) return STATE_PUSH;           // Button Pressed
+    if (val > 1200 && val < 3100) return STATE_K0; // K0 Pressed
+    return STATE_NONE;
 
-#define ENC_A_PIN    10
-#define ENC_B_PIN    20
-#define ENC_BTN_PIN  21
-#define KEY0_PIN     0
+  #else
+    // --- VERSION 2: DIGITAL LOGIC (Pins 21 & 0) ---
+    // Note: Assuming Active LOW (Pin goes to GND when pressed)
+    
+    // Check Encoder Button (Pin 21)
+    if (digitalRead(ENC_BTN_PIN) == LOW) return STATE_PUSH;
+    
+    // Check KO Button (Pin 0)
+    if (digitalRead(KEY0_PIN) == LOW) return STATE_K0;
+    
+    return STATE_NONE;
+  #endif
+}
 
-#define SDA_PIN 1
-#define SCL_PIN 2
-
-#define LED_PIN 4
-#define BUZZ_PIN 3
 
 // ====== TFT & Sensors ======
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST); // hardware SPI
@@ -171,14 +225,12 @@ ScioSense_ENS160 ens160(0x53);   // ENS160 I2C address 0x53
 #define CYBER_DARK    0x4208
 #define RAIN 0x8cfe
 
-
 // --- NEW BACKGROUND COLORS (Dimmed for readability) ---
 #define BG_CLEAR      0x0000  // Keep Black for Clear (or use 0x0010 for very dark blue)
 #define BG_CLOUDS     0x2124  // Dark Grey
 #define BG_RAIN       0x0010  // Deep Navy Blue
 #define BG_SNOW       0x632C  // Cold Grey/Blue
 #define BG_THUNDER    0x2004  // Dark Purple/Grey
-
 
 #ifndef PI
 #define PI 3.1415926
@@ -191,38 +243,38 @@ enum UIMode {
   MODE_POMODORO,
   MODE_ALARM,
   MODE_DVD,
+  MODE_DAY_COUNTER,
   MODE_SETTINGS,
   MODE_WORD
 };
 UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
 int menuIndex = 0;
-const int MENU_ITEMS = 6;       // Monitor, Pomodoro, Alarm, DVD, Game
+const int MENU_ITEMS = 7;       // Monitor, Pomodoro, Alarm, DVD, Day Counter, Word of the day, Settings 
 
-
-// ====== POMODORO GLOBALS ======
+// ====== Pomodoro ======
 enum PomoPhase {
   PHASE_WORK = 0,
   PHASE_BREAK
 };
 
 enum PomoState {
-  STATE_READY = 0, // Waiting to start
-  STATE_RUNNING,   // Counting down
-  STATE_PAUSED     // Paused
+  STATE_READY = 0,
+  STATE_RUNNING,
+  STATE_PAUSED
 };
 
 PomoPhase pomoPhase = PHASE_WORK;
 PomoState pomoState = STATE_READY;
 
-long workDurationSec  = 25 * 60; // Default 25 min
-long breakDurationSec = 5 * 60;  // Default 5 min
+long workDurationSec = 25 * 60; // Default 25 min
+long breakDurationSec = 5 * 60; // Default 5 min
 
 long pomoCurrentSec = 0;        // Current countdown value
-unsigned long lastPomoTick = 0; // Tracks millis for seconds
-int pomoStep = 1;               // Session Counter (1/4)
+unsigned long lastPomoTick = 0; // To track millis()
+int pomoStep = 1;               // 1/4
 const int POMO_MAX_STEPS = 4;
 
-bool pomoAlarmActive = false;   // Is the alarm ringing?
+bool pomoAlarmActive = false;
 unsigned long pomoAlarmStart = 0;
 
 // ====== Env values ======
@@ -293,18 +345,6 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 }
 
 // ========= Alarm icon =========
-/*
-void drawAlarmIcon() {
-  int x = 148;
-  tft.fillRect(x - 10, 0, 12, 12, CYBER_BG);
-  if (!alarmEnabled) return;
-
-  uint16_t c = CYBER_LIGHT; // cam
-  tft.drawRoundRect(x - 9, 2, 10, 7, 2, c);
-  tft.drawFastHLine(x - 8, 8, 8, c);
-  tft.fillCircle(x - 4, 10, 1, c);
-}*/
-// ========= Alarm icon =========
 // Now accepts a background color (defaults to Black if not specified)
 void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
   int x = 148;
@@ -319,9 +359,6 @@ void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
   tft.drawFastHLine(x - 8, 8, 8, c);
   tft.fillCircle(x - 4, 10, 1, c);
 }
-
-
-
 
 // This function runs ONLY if WiFi connection fails and AP mode starts
 void configModeCallback(WiFiManager *myWiFiManager) {
@@ -340,7 +377,7 @@ void configModeCallback(WiFiManager *myWiFiManager) {
   // Line 2
   tft.setCursor(10, tft.getCursorY()); 
   tft.setTextColor(CYBER_ACCENT);
-  tft.println("   WIFI: CyberClock");
+  tft.println("   WIFI: Ambrogio");
   
   // Line 3
   tft.setTextColor(ST77XX_WHITE);
@@ -352,9 +389,7 @@ void configModeCallback(WiFiManager *myWiFiManager) {
   tft.println("   to input Pass");
 }
 
-
 // ========== HELPERS ==============
-
 
 // Load up to 3 saved networks from memory into WiFiMulti
 void loadWiFiList() {
@@ -421,12 +456,6 @@ void saveCurrentNetwork() {
   Serial.println("New Network Saved to Slot 0");
   prefs.end();
 }
-
-
-
-
-
-
 
 // ========= WiFi & Time =========
 void connectWiFiAndSyncTime() {
@@ -522,11 +551,11 @@ void connectWiFiAndSyncTime() {
     "</style>";
   
     wm.setCustomHeadElement(customCSS);
-    wm.setTitle("CYBER CLOCK");
+    wm.setTitle("Ambrogio");
     wm.setAPCallback(configModeCallback);
     
     // Start Pop-up
-    bool res = wm.autoConnect("Cyber Clock");
+    bool res = wm.autoConnect(AP_SSID, AP_PASSWORD);
 
     if (!res) {
       tft.fillScreen(CYBER_BG);
@@ -560,7 +589,6 @@ void connectWiFiAndSyncTime() {
     retry++;
   }
 }
-
 
 String getTimeStr(char type) {
   struct tm timeinfo;
@@ -756,15 +784,10 @@ void drawEnvDynamic(float temp, float hum, uint16_t tvoc, uint16_t eco2) {
                    ST77XX_WHITE);
 }
 
-
 // WORD OF THE DAY 
 // ====== WotD Helper Functions ======
 
 // Helper to replace Italian accents for standard display compatibility
-
-// ====== WotD Helper Functions ======
-
-// ====== WotD Helper Functions ======
 
 String fixAccents(String str) {
   str.replace("&quot;", "\"");
@@ -836,7 +859,6 @@ String cleanHtml(String raw) {
   }
   return finalStr;
 }
-
 
 void calculateContentHeight() {
   // Logic matches drawWordScreen exactly to ensure sync
@@ -980,197 +1002,6 @@ void fetchWordOfDay() {
   http.end();
 }
 
-// [Updated] Word of Day Screen with Flicker Reduction
-/*
-void drawWordScreen(int scrollOffset, bool fullRedraw = false) {
-  
-  // === CONFIGURATION ===
-  int headerHeight = 50;  // The Title area (0 to 35)
-  int screenWidth  = 160;
-  int screenHeight = 128;
-  
-  // --- PART 1: DRAW THE HEADER (Only on first load or full reset) ---
-  if (fullRedraw) {
-    tft.fillScreen(CYBER_BG); // Clear everything once
-    
-    // Draw Title
-    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
-    tft.setTextSize(2);
-    
-    int wLen = wotdWord.length() * 12; // Approx width for size 2
-    int xPos = (screenWidth - wLen) / 2;
-    if(xPos < 0) xPos = 0;
-    
-    tft.setCursor(xPos, 5); // Title starts at Y=5
-    tft.print(wotdWord);
-    
-    // Draw Divider Line (Safe Visual Separator)
-    tft.drawFastHLine(0, 32, screenWidth, CYBER_DARK);
-    
-  } else {
-    // --- PART 2: SCROLLING UPDATE (Clear only the bottom) ---
-    // CRITICAL FIX: Start clearing at 'headerHeight' (35). 
-    // If this is lower than 30, it cuts the title.
-    tft.fillRect(0, headerHeight, screenWidth, screenHeight - headerHeight, CYBER_BG);
-  }
-
-  // If text isn't loaded yet, stop here
-  if (!wotdLoaded) {
-    tft.setCursor(10, 60);
-    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-    tft.print("Loading...");
-    return;
-  }
-
-  // --- PART 3: DRAW THE SCROLLING TEXT ---
-  tft.setTextWrap(false); 
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-
-  int startY = 45 - scrollOffset; // Text "virtual" start position
-  int cursorX = 10; 
-  int cursorY = startY;
-  int lineHeight = 10;
-  int rightMargin = 155; 
-  
-  String currentWord = "";
-  
-  for (int i = 0; i < wotdDef.length(); i++) {
-    char c = wotdDef.charAt(i);
-    
-    // Word wrapping logic
-    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
-      if (c != ' ' && c != '\n') currentWord += c;
-      
-      int wordWidth = currentWord.length() * 6; 
-      
-      if (cursorX + wordWidth > rightMargin) {
-        cursorX = 10;
-        cursorY += lineHeight;
-      }
-      
-      // === DRAWING CHECK ===
-      // Only draw if the text is physically below the header line
-      if (currentWord.length() > 0) {
-        if (cursorY >= headerHeight && cursorY < 128) {
-           tft.setCursor(cursorX, cursorY);
-           tft.print(currentWord);
-        }
-      }
-      
-      cursorX += wordWidth;
-      if (c == ' ') cursorX += 6;
-      else if (c == '\n') {
-        cursorX = 10;
-        cursorY += lineHeight;
-      }
-      currentWord = "";
-    } else {
-      currentWord += c;
-    }
-  }
-
-  // --- PART 4: SCROLL INDICATORS ---
-  // Re-draw scroll arrows on top of everything if needed
-  if(scrollOffset > 0) {
-     tft.fillTriangle(150, headerHeight + 2, 154, headerHeight + 6, 146, headerHeight + 6, CYBER_ACCENT);
-  }
-  if(cursorY > 128) {
-     tft.fillTriangle(150, 124, 154, 120, 146, 120, CYBER_ACCENT);
-  }
-}*/
-/*
-void drawWordScreen(int scrollOffset, bool fullRedraw) {
-  
-  // === CONFIG: SAFETY MARGINS ===
-  // We push the scrolling text down to 40px to give the Title plenty of room.
-  int headerLimit = 40; 
-
-  // --- PART 1: DRAW HEADER (Only does this if fullRedraw is TRUE) ---
-  if (fullRedraw) {
-    tft.fillScreen(CYBER_BG);
-    
-    // Draw Title
-    tft.setTextColor(CYBER_ACCENT, CYBER_BG); 
-    tft.setTextSize(2);
-    
-    // Center the Title
-    int wLen = wotdWord.length() * 12;
-    int xPos = (160 - wLen) / 2;
-    if(xPos < 0) xPos = 0;
-    
-    tft.setCursor(xPos, 5); // Title starts at Y=5
-    tft.print(wotdWord);
-    
-    // Debug: If you still see a line, this specific fillRect might be the cause
-    // But since we are inside 'fullRedraw', it happens BEFORE text is drawn.
-  } else {
-    // --- PART 2: SCROLL CLEARING (Only Clear BELOW the header) ---
-    // This rectangle clears the scrolling area. 
-    // It starts at 'headerLimit' (40). The title ends around 25. 
-    // There is now a 15px safe gap.
-    tft.fillRect(0, headerLimit, 160, 128 - headerLimit, CYBER_BG);
-  }
-
-  if (!wotdLoaded) {
-    tft.setCursor(10, 60);
-    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-    tft.print("Loading...");
-    return;
-  }
-
-  // --- PART 3: DRAW SCROLLING TEXT ---
-  tft.setTextWrap(false); 
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-
-  int startY = 50 - scrollOffset; // Start text a bit lower (50)
-  int cursorX = 10; 
-  int cursorY = startY;
-  int lineHeight = 10;
-  int rightMargin = 155; 
-  
-  String currentWord = "";
-  
-  for (int i = 0; i < wotdDef.length(); i++) {
-    char c = wotdDef.charAt(i);
-    
-    if (c == ' ' || c == '\n' || i == wotdDef.length() - 1) {
-      if (c != ' ' && c != '\n') currentWord += c;
-      
-      int wordWidth = currentWord.length() * 6; 
-      
-      if (cursorX + wordWidth > rightMargin) {
-        cursorX = 10;
-        cursorY += lineHeight;
-      }
-      
-      // === DRAWING CHECK ===
-      // Only draw if the text is physically BELOW the header limit
-      if (currentWord.length() > 0) {
-        if (cursorY >= headerLimit && cursorY < 128) {
-           tft.setCursor(cursorX, cursorY);
-           tft.print(currentWord);
-        }
-      }
-      
-      cursorX += wordWidth;
-      if (c == ' ') cursorX += 6;
-      else if (c == '\n') {
-        cursorX = 10;
-        cursorY += lineHeight;
-      }
-      currentWord = "";
-    } else {
-      currentWord += c;
-    }
-  }
-
-  // Scroll Indicator (Bottom only)
-  if(cursorY > 128) {
-     tft.fillTriangle(150, 124, 154, 120, 146, 120, CYBER_ACCENT);
-  }
-}*/
 void drawWordScreen(int scrollOffset, bool fullRedraw) {
   
   // === CONFIG ===
@@ -1259,39 +1090,163 @@ void drawWordScreen(int scrollOffset, bool fullRedraw) {
   // (Arrows removed completely)
 }
 
-// ========= Menu UI =========
-/*
-void drawMenu() {
-  tft.fillScreen(CYBER_BG);
 
+
+
+//REMOTE UPDATE
+void updateSystem() {
+  tft.fillScreen(CYBER_BG);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.setTextSize(1);
+  tft.setCursor(10, 10);
+  tft.print("SYSTEM UPDATE");
+  
+  tft.setCursor(10, 40);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print("Connecting to Server...");
+  
+  // 1. Setup Secure Client (GitHub requires HTTPS)
+  WiFiClientSecure client;
+  client.setInsecure(); // Skip certificate check for simplicity
+  
+  // 2. Setup Progress Callback
+  // This updates the UI while the loop is blocked downloading
+  httpUpdate.onProgress([](int cur, int total) {
+    static int prevPercent = -1;
+    int percent = (cur * 100) / total;
+    
+    if (percent != prevPercent) {
+      prevPercent = percent;
+      
+      // Draw Bar Background
+      tft.drawRect(10, 70, 140, 14, CYBER_DARK);
+      
+      // Draw Bar Fill
+      int w = map(percent, 0, 100, 0, 136);
+      tft.fillRect(12, 72, w, 10, CYBER_GREEN);
+      
+      // Text
+      tft.setTextColor(ST77XX_WHITE, CYBER_BG);
+      tft.setCursor(65, 90);
+      tft.print(percent); tft.print("%");
+      
+      // Blink LED
+      digitalWrite(LED_PIN, (percent % 10 < 5) ? HIGH : LOW);
+    }
+  });
+
+
+  // 3. IMPORTANT: Enable Redirects for GitHub
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  // 3. Start Update
+  // This will BLOCK until finished or failed
+  t_httpUpdate_return ret = httpUpdate.update(client, FW_URL);
+
+  // 4. Handle Result
+  tft.fillScreen(CYBER_BG);
+  tft.setCursor(10, 60);
+  
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      tft.setTextColor(ST77XX_RED);
+      tft.println("UPDATE FAILED!");
+      tft.setCursor(10, 80);
+      tft.printf("Err: %d", httpUpdate.getLastError());
+      delay(3000);
+      break;
+
+    case HTTP_UPDATE_NO_UPDATES:
+      tft.setTextColor(ST77XX_WHITE);
+      tft.println("NO UPDATES FOUND");
+      delay(2000);
+      break;
+
+    case HTTP_UPDATE_OK:
+      tft.setTextColor(CYBER_GREEN);
+      tft.println("SUCCESS! REBOOTING");
+      delay(1000);
+      ESP.restart();
+      break;
+  }
+}
+  // Return to menu if failed
+// Generic function to draw ANY list menu with support for SCROLLING
+// If currentScroll is NULL, it behaves like a static list (no scroll)
+
+void drawListMenu(const char* title, const char* items[], int count, int selIndex, int* currentScroll = NULL) {
+  tft.fillScreen(CYBER_BG);
+  
+  // --- Constants ---
+  const int ITEM_HEIGHT   = 18;
+  const int HEADER_HEIGHT = 35;
+  const int VISIBLE_H     = 128 - HEADER_HEIGHT;
+
+  // --- Scroll Logic (Copied from drawMenu) ---
+  int localScroll = 0;
+  if (currentScroll != NULL) localScroll = *currentScroll;
+
+  int selectionY = selIndex * ITEM_HEIGHT;
+  int margin = ITEM_HEIGHT;
+
+  // 1. Calculate Target Scroll
+  if (selectionY < localScroll + margin) {
+     localScroll = selectionY - margin;
+  }
+  if (selectionY + ITEM_HEIGHT > localScroll + VISIBLE_H - margin) {
+     localScroll = (selectionY + ITEM_HEIGHT) - (VISIBLE_H - margin);
+  }
+
+  // 2. Clamp Scroll
+  int totalListHeight = count * ITEM_HEIGHT;
+  int maxScroll = totalListHeight - VISIBLE_H + margin;
+  if (maxScroll < 0) maxScroll = 0;
+  if (localScroll < 0) localScroll = 0;
+  if (localScroll > maxScroll) localScroll = maxScroll;
+
+  // 3. Save Scroll Back (if tracking)
+  if (currentScroll != NULL) *currentScroll = localScroll;
+
+  // --- Draw Header ---
+  tft.fillRect(0, 0, 160, HEADER_HEIGHT, CYBER_BG); // Clear header zone
   tft.setTextSize(1);
   tft.setTextColor(CYBER_LIGHT);
   tft.setCursor(10, 10);
-  tft.print("MODE SELECT");
+  tft.print(title);
+  drawAlarmIcon();
 
-  const char* items[MENU_ITEMS] = {
-    "Monitor",
-    "Pomodoro",
-    "Alarm",
-    "DVD",
-    "Word of Day",
-    "Settings"
-  };
+  // --- Draw Items ---
+  int startY = HEADER_HEIGHT - localScroll;
 
-  for (int i = 0; i < MENU_ITEMS; i++) {
-    int y = 32 + i * 18;
-    if (i == menuIndex) {
+  for (int i = 0; i < count; i++) {
+    int y = startY + (i * ITEM_HEIGHT);
+
+    // Visibility Check (Don't draw if off screen)
+    if (y < HEADER_HEIGHT) continue; 
+    if (y > 128) continue;
+
+    if (i == selIndex) {
       tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
       tft.setTextColor(CYBER_BG);
     } else {
       tft.fillRect(6, y - 2, 148, 14, CYBER_BG);
       tft.setTextColor(ST77XX_WHITE);
     }
+    
     tft.setCursor(12, y);
     tft.print(items[i]);
   }
-  drawAlarmIcon();
-}*/
+  
+  // Optional: Scroll Arrows
+  if (localScroll > 0) tft.fillTriangle(150, 20, 154, 24, 146, 24, CYBER_ACCENT);
+  if (localScroll < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
+}
+
+
+
+
+
+// ========= Menu UI =========
+
 void drawMenu() {
   tft.fillScreen(CYBER_BG);
 
@@ -1305,6 +1260,7 @@ void drawMenu() {
     "Pomodoro",
     "Alarm",
     "DVD",
+    "Day Counter",
     "Word of Day",
     "Settings"
   };
@@ -1374,106 +1330,17 @@ void drawMenu() {
   if (menuScrollY < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
 }
 
+
 // ========= Pomodoro =========
-/*
 void drawPomodoroScreen(bool fullRedraw) {
-  if (fullRedraw) tft.fillScreen(CYBER_BG);
-
-  // 1. TOP HEADER (Cleared to prevent flicker/overlap)
-  tft.fillRect(0, 0, 160, 14, CYBER_BG);
-  tft.setTextSize(1);
-  tft.setCursor(6, 4);
-  
-  if (pomoPhase == PHASE_WORK) {
-    tft.setTextColor(CYBER_ACCENT, CYBER_BG);
-    tft.print("WORK SESSION");
-  } else {
-    tft.setTextColor(CYBER_GREEN, CYBER_BG);
-    tft.print("BREAK TIME");
-  }
-
-  // "PAUSED" / "READY" Indicator (Top Right)
-  tft.setCursor(100, 4);
-  if (pomoState == STATE_PAUSED) {
-    tft.setTextColor(ST77XX_ORANGE, CYBER_BG);
-    tft.print("PAUSED");
-  } else if (pomoState == STATE_READY) {
-    tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-    tft.print("READY");
-  } 
-
-  // 2. CENTER TIMER (Big Text)
-  int m = pomoCurrentSec / 60;
-  int s = pomoCurrentSec % 60;
-  char timeBuf[10];
-  sprintf(timeBuf, "%02d:%02d", m, s);
-
-  // Measure text width to center it perfectly
-  tft.setTextSize(3);
-  int16_t x1, y1; 
-  uint16_t w, h;
-  tft.getTextBounds("00:00", 0, 0, &x1, &y1, &w, &h);
-  
-  int textX = (160 - w) / 2;
-  int textY = 45;
-
-  // Clear previous numbers to prevent ghosting
-  tft.fillRect(textX - 4, textY - 4, w + 8, h + 8, CYBER_BG);
-  
-  tft.setCursor(textX, textY);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-  tft.print(timeBuf);
-
-  // 3. PROGRESS BAR
-  long totalDuration = (pomoPhase == PHASE_WORK) ? workDurationSec : breakDurationSec;
-  float progress = 1.0 - ((float)pomoCurrentSec / totalDuration);
-  if (progress < 0) progress = 0;
-  if (progress > 1) progress = 1;
-
-  int barX = 10;
-  int barY = 80;
-  int barW = 140;
-  int barH = 6;
-  
-  // Draw frame only on full redraw
-  if (fullRedraw) tft.drawRect(barX-1, barY-1, barW+2, barH+2, CYBER_DARK);
-  
-  int fillW = (int)(barW * progress);
-  uint16_t barColor = (pomoPhase == PHASE_WORK) ? CYBER_PINK : CYBER_GREEN;
-  
-  tft.fillRect(barX, barY, fillW, barH, barColor);
-  tft.fillRect(barX + fillW, barY, barW - fillW, barH, CYBER_BG);
-
-  // 4. BOTTOM FOOTER
-  tft.fillRect(0, 108, 160, 20, CYBER_BG); // Clear footer
-
-  tft.setTextSize(1);
-  tft.setTextColor(CYBER_LIGHT, CYBER_BG);
-  
-  char footerBuf[30];
-  long otherVal = (pomoPhase == PHASE_WORK) ? breakDurationSec : workDurationSec;
-  const char* label = (pomoPhase == PHASE_WORK) ? "Break" : "Work";
-  
-  sprintf(footerBuf, "%s: %02d:%02d", label, (int)(otherVal/60), (int)(otherVal%60));
-  tft.setCursor(6, 110);
-  tft.print(footerBuf);
-
-  tft.setCursor(100, 110);
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-  tft.printf("Step: %d/%d", pomoStep, POMO_MAX_STEPS);
-  
-  // Optional: Draw Alarm Icon if you have that function
-  // drawAlarmIcon(); 
-}*/
-void drawPomodoroScreen(bool fullRedraw) {
-  // --- 1. STATIC LAYER (Draw only ONCE) ---
   if (fullRedraw) {
     tft.fillScreen(CYBER_BG);
     
-    // Header
-    tft.fillRect(0, 0, 160, 14, CYBER_BG);
+    // --- 1. HEADER (Only draw once) ---
+    tft.fillRect(0, 0, 160, 14, CYBER_BG); // Clear header
     tft.setTextSize(1);
     tft.setCursor(6, 4);
+    
     if (pomoPhase == PHASE_WORK) {
       tft.setTextColor(CYBER_ACCENT, CYBER_BG);
       tft.print("WORK SESSION");
@@ -1482,27 +1349,31 @@ void drawPomodoroScreen(bool fullRedraw) {
       tft.print("BREAK TIME");
     }
     
-    // Bar Outline
-    tft.drawRect(9, 79, 142, 8, CYBER_DARK);
-    
-    // Footer Info
+    // --- 4. FOOTER (Only draw once) ---
+    // The footer info (Step count, Next break time) doesn't change 
+    // during the countdown, so we move it here to stop the flicker.
+    tft.fillRect(0, 108, 160, 20, CYBER_BG);
+    tft.setTextSize(1);
     tft.setTextColor(CYBER_LIGHT, CYBER_BG);
+    
     char footerBuf[30];
     long otherVal = (pomoPhase == PHASE_WORK) ? breakDurationSec : workDurationSec;
     const char* label = (pomoPhase == PHASE_WORK) ? "Break" : "Work";
+    
     sprintf(footerBuf, "%s: %02d:%02d", label, (int)(otherVal/60), (int)(otherVal%60));
     tft.setCursor(6, 110);
     tft.print(footerBuf);
-    
+  
     tft.setCursor(100, 110);
     tft.setTextColor(ST77XX_WHITE, CYBER_BG);
     tft.printf("Step: %d/%d", pomoStep, POMO_MAX_STEPS);
+    
+    drawAlarmIcon();
   }
 
-  // --- 2. DYNAMIC LAYER (Update every frame) ---
-  
-  // A. STATUS INDICATOR (Top Right)
-  // We use setTextColor(FG, BG) to overwrite previous text without flickering
+  // --- "PAUSED" STATUS ---
+  // We still need to check this every loop in case we just paused/unpaused
+  // But we only redraw this specific small area.
   tft.setTextSize(1);
   tft.setCursor(100, 4);
   if (pomoState == STATE_PAUSED) {
@@ -1510,14 +1381,14 @@ void drawPomodoroScreen(bool fullRedraw) {
     tft.print("PAUSED");
   } else if (pomoState == STATE_READY) {
     tft.setTextColor(ST77XX_WHITE, CYBER_BG);
-    tft.print("READY "); 
+    tft.print("READY ");
   } else {
-    // Running: Print spaces to clear "READY" or "PAUSED"
+    // If Running, erase "PAUSED" or "READY" by printing spaces
     tft.setTextColor(CYBER_BG, CYBER_BG);
     tft.print("      "); 
   }
 
-  // B. MAIN TIMER
+  // --- 2. TIMER (The Anti-Flicker Fix) ---
   int m = pomoCurrentSec / 60;
   int s = pomoCurrentSec % 60;
   char timeBuf[10];
@@ -1525,16 +1396,24 @@ void drawPomodoroScreen(bool fullRedraw) {
 
   tft.setTextSize(3);
   
-  // Calculate center (approximate width for "00:00" is 90px at size 3)
-  int textX = (160 - (5 * 18)) / 2; 
+  // FIX: Calculate position based on "88:88" (Max Width) ONCE.
+  // This keeps the clock perfectly centered and stops it from jumping 
+  // left/right when narrow numbers like "1" appear.
+  int16_t x1, y1; 
+  uint16_t w, h;
+  tft.getTextBounds("88:88", 0, 0, &x1, &y1, &w, &h); 
+  
+  int textX = (160 - w) / 2;
   int textY = 45;
 
+  // FIX: We DO NOT use fillRect here anymore.
+  // We rely on 'setTextColor(WHITE, BG)' to overwrite the old pixels.
+  // This removes the "Black Flash" completely.
+  tft.setTextColor(ST77XX_WHITE, CYBER_BG);
   tft.setCursor(textX, textY);
-  // CRITICAL FIX: Draw White Text on Black BG. No fillRect needed!
-  tft.setTextColor(ST77XX_WHITE, CYBER_BG); 
   tft.print(timeBuf);
 
-  // C. PROGRESS BAR
+  // --- 3. PROGRESS BAR ---
   long totalDuration = (pomoPhase == PHASE_WORK) ? workDurationSec : breakDurationSec;
   float progress = 1.0 - ((float)pomoCurrentSec / totalDuration);
   if (progress < 0) progress = 0;
@@ -1544,11 +1423,14 @@ void drawPomodoroScreen(bool fullRedraw) {
   int barY = 80;
   int barW = 140;
   int barH = 6;
-  int fillW = (int)(barW * progress);
   
+  if (fullRedraw) tft.drawRect(barX-1, barY-1, barW+2, barH+2, CYBER_DARK);
+  
+  int fillW = (int)(barW * progress);
   uint16_t barColor = (pomoPhase == PHASE_WORK) ? CYBER_PINK : CYBER_GREEN;
   
-  // Only draw changes? No, drawing rects is fast enough.
+  // Draw the two parts of the bar (Filled vs Empty)
+  // This is efficient and doesn't flicker much
   tft.fillRect(barX, barY, fillW, barH, barColor);
   tft.fillRect(barX + fillW, barY, barW - fillW, barH, CYBER_BG);
 }
@@ -1801,75 +1683,6 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
 }
 
 //========= WHEATER STUF ===========
-/*
-void fetchWeather() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  WiFiClient client;
-  HTTPClient http;
-  
-  // We still fetch the forecast
-  String url = "http://api.openweathermap.org/data/2.5/forecast?q=" + city + "&appid=" + weatherKey + "&units=metric&cnt=6";
-  
-  http.begin(client, url);
-  int httpCode = http.GET();
-
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    
-    // Filter to save memory
-    JsonDocument filter;
-    filter["list"][0]["dt"] = true;
-    filter["list"][0]["main"]["temp"] = true;
-    filter["list"][0]["weather"][0]["main"] = true;
-    filter["city"]["timezone"] = true;
-
-    JsonDocument doc; 
-    DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-
-    if (!error) {
-      long timezone = doc["city"]["timezone"];
-      
-      // --- POINT 0: CURRENT WEATHER (NOW) ---
-      // We use the global 'outTemp' we fetched earlier (or use 1st forecast slot as proxy if needed)
-      // Note: Best practice is to assume fetchWeather updates outTemp first. 
-      // If outTemp is 0 (first run), we'll trust the first forecast slot.
-      if (outTemp == 0) outTemp = doc["list"][0]["main"]["temp"];
-      
-      fTemps[0] = outTemp;
-      fRain[0]  = (outDesc.indexOf("Rain") >= 0 || outDesc.indexOf("Drizzle") >= 0 || outDesc.indexOf("Thunder") >= 0);
-      
-      // Get current local hour
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo)) {
-        fHours[0] = timeinfo.tm_hour;
-      } else {
-        fHours[0] = 0; 
-      }
-
-      // --- POINTS 1-5: FORECAST (Next 15 hours) ---
-      for(int i=0; i<5; i++) {
-        fTemps[i+1] = doc["list"][i]["main"]["temp"];
-        
-        const char* w = doc["list"][i]["weather"][0]["main"];
-        String cond = String(w);
-        fRain[i+1] = (cond.indexOf("Rain") >= 0 || cond.indexOf("Drizzle") >= 0 || cond.indexOf("Thunder") >= 0);
-
-        // Calculate Hour
-        unsigned long dt = doc["list"][i]["dt"];
-        time_t rawTime = (time_t)(dt + timezone); 
-        struct tm* ti = gmtime(&rawTime);   
-        fHours[i+1] = ti->tm_hour;
-      }
-      
-      weatherLoaded = true;
-      forecastLoaded = true;
-      Serial.println("Forecast Updated (Start=Now).");
-    }
-  }
-  http.end();
-}
-*/
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1955,51 +1768,6 @@ void fetchWeather() {
   http.end();
 }
 
-/*
-void drawWeatherScreen() {
-  tft.fillScreen(CYBER_BG);
-  
-  // Header
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(1);
-  tft.setCursor(10, 5);
-  tft.print("METEO for "); 
-  tft.print(city);
-  
-  if (!weatherLoaded) {
-    tft.setCursor(20, 60);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.print("Loading...");
-    return;
-  }
-
-  // Draw Big Temperature
-  tft.setTextSize(3);
-  tft.setTextColor(CYBER_ACCENT);
-  tft.setCursor(30, 40);
-  tft.print(outTemp, 1);
-  tft.setTextSize(1);
-  tft.print(" C");
-
-  // Draw Condition (Rain/Clear/etc)
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  int descW = outDesc.length() * 12;
-  tft.setCursor((160 - descW) / 2, 80);
-  tft.print(outDesc);
-
-  // Draw Humidity
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(40, 110);
-  tft.print("Humidity: ");
-  tft.print(outHum);
-  tft.print("%");
-  
-  drawAlarmIcon();
-}
-*/ 
-
 void drawWeatherScreen() {
   // 1. Determine Background based on Condition
   uint16_t bgCol = CYBER_BG; // Default Black
@@ -2021,7 +1789,8 @@ void drawWeatherScreen() {
   // 2. Header (Top Left)
   tft.setTextColor(ST77XX_WHITE, bgCol);
   tft.setTextSize(1);
-  tft.setCursor(10, 5);
+  //tft.setCursor(10, 5);
+  tft.setCursor(4, 4);
   tft.print("METEO: "); 
   
   // --- FIX: USE DYNAMIC NAME FROM SETTINGS ---
@@ -2069,7 +1838,7 @@ void drawGraphScreen() {
   tft.setTextSize(1);
   //tft.setTextColor(CYBER_LIGHT);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(10, 4);
+  tft.setCursor(4, 4);
   //tft.print("FORECAST (Now -> +15h)");
   tft.print("Forecast Now -> +15h");
 
@@ -2166,7 +1935,217 @@ void drawGraphScreen() {
 
 //=========
 
+// ========= Day Counter / Year Progression (grid and circle) =========
 
+bool isLeap(int year) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+}
+
+// TAB 1: The Matrix Grid
+void drawYearGrid(int dayIdx, int totalDays) {
+  tft.fillScreen(CYBER_BG);
+
+  // 2. Header
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(6, 4);
+  tft.print("YEAR PROGRESS");
+  
+  // Draw percentage
+  float progress = ((float)(dayIdx + 1) / totalDays) * 100.0;
+  tft.setCursor(110, 4);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.print((int)progress); tft.print("%");
+
+  drawAlarmIcon(); // Keep UI consistent
+
+  // 3. Grid Settings
+  // We have ~160px width. Let's do 25 columns.
+  // 160 / 25 = ~6.4 pixels per cell. 
+  // We will use 3x3 px box + 3px gap.
+  
+  int cols = 25;
+  int startX = 5; 
+  int startY = 20;
+  int cellStep = 6; // 3px box + 3px gap
+  int boxSize = 3;
+
+  for (int i = 0; i < totalDays; i++) {
+    int row = i / cols;
+    int col = i % cols;
+
+    int x = startX + col * cellStep;
+    int y = startY + row * cellStep;
+
+    uint16_t color;
+
+    if (i < dayIdx) {
+      // Past days: Dim Green or Darker Accent
+      color = 0x03E0; // A darker green (custom) or use CYBER_DARK
+    } else if (i == dayIdx) {
+      // Today: Bright White or Pink
+      color = ST77XX_WHITE; 
+    } else {
+      // Future: Very dark gray (placeholder)
+      color = 0x2104; // Very dark grey
+    }
+
+    tft.fillRect(x, y, boxSize, boxSize, color);
+    
+    // Optional: Highlight "Today" with an extra outline or color
+    if (i == dayIdx) {
+      tft.drawRect(x-1, y-1, boxSize+2, boxSize+2, CYBER_PINK);
+    }
+  }
+
+  // 4. Footer Info
+  tft.setCursor(6, 118);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.printf("Day %d / %d", dayIdx + 1, totalDays);
+}
+
+// ==========================================
+//      YEAR PROGRESS: 12-Month "Sausage" Ring
+// ==========================================
+
+// Helper to draw a thick arc segment with rounded ends ("Sausage")
+// cx, cy: Center of screen
+// r: Mid-radius (center of the sausage thickness)
+// w: Thickness (width of the sausage)
+// startAngle, endAngle: Degrees (0 is right, -90 is up)
+// color: Fill color
+void drawSausageSegment(int cx, int cy, float r, float w, float startAngle, float endAngle, uint16_t color) {
+  // 1. Draw the Arc Body (using radial lines for "solid" look)
+  // We step by 1 degree (or 2 for speed) to fill the arc
+  float halfW = w / 2.0;
+  float rIn  = r - halfW;
+  float rOut = r + halfW;
+  
+  // Convert to radians
+  float degStep = 1.0; 
+  
+  for (float d = startAngle; d <= endAngle; d += degStep) {
+    float rad = d * PI / 180.0;
+    float cosA = cos(rad);
+    float sinA = sin(rad);
+    
+    int x1 = cx + cosA * rIn;
+    int y1 = cy + sinA * rIn;
+    int x2 = cx + cosA * rOut;
+    int y2 = cy + sinA * rOut;
+    
+    tft.drawLine(x1, y1, x2, y2, color);
+  }
+
+  // 2. Draw Rounded Caps (Circles at start and end)
+  // Start Cap
+  /*float radStart = startAngle * PI / 180.0;
+  int capX1 = cx + cos(radStart) * r;
+  int capY1 = cy + sin(radStart) * r;
+  tft.fillCircle(capX1, capY1, halfW, color);
+
+  // End Cap
+  float radEnd = endAngle * PI / 180.0;
+  int capX2 = cx + cos(radEnd) * r;
+  int capY2 = cy + sin(radEnd) * r;
+  tft.fillCircle(capX2, capY2, halfW, color);*/
+}
+
+void drawYearCircle(int dayIdx, int totalDays) {
+  tft.fillScreen(CYBER_BG);
+
+  // --- HEADER ---
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(6, 4);
+  tft.print("YEAR PROGRESS"); // Shortened to fit nicely
+
+  // Stats Text
+  int percent = (int)(((float)(dayIdx + 1) / totalDays) * 100);
+  tft.setCursor(120, 4);
+  tft.setTextColor(CYBER_ACCENT);
+  tft.print(percent); tft.print("%");
+
+  // --- LAYOUT ---
+  int cx = 80;
+  int cy = 72;        // Moved down to leave space for header
+  float radius = 38;  // Radius of the ring center
+  float thickness = 10; // Thickness of the sausage
+  
+  // Month Data
+  int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  
+  // Leap Year Check (Global 'totalDays' passed in is already 366 if leap)
+  if (totalDays == 366) daysInMonth[1] = 29;
+
+  // Calculate current month and day-of-month
+  int currentMonth = 0;
+  int tempDays = dayIdx; // Copy of day index
+  for (int i = 0; i < 12; i++) {
+    if (tempDays < daysInMonth[i]) {
+      currentMonth = i;
+      break;
+    }
+    tempDays -= daysInMonth[i];
+  }
+  int dayOfMonth = tempDays; // Remaining days is the day in current month
+
+  // --- DRAWING LOOP ---
+  // We go from -90 (Top) clockwise
+  float anglePerMonth = 360.0 / 12.0; 
+  float gap = 6.0; // Degrees of gap between sausages
+  
+  for (int m = 0; m < 12; m++) {
+    // Math: -90 is 12 o'clock. 
+    float startDeg = -90.0 + (m * anglePerMonth) + (gap / 2.0);
+    float endDeg   = startDeg + (anglePerMonth - gap);
+
+    // Render Logic
+    if (m < currentMonth) {
+      // 1. PAST MONTH: Full Green Sausage
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_GREEN);
+    } 
+    else if (m > currentMonth) {
+      // 2. FUTURE MONTH: Dark "Empty" Sausage
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_DARK);
+    } 
+    else {
+      // 3. CURRENT MONTH: Partial Fill
+      // First draw the dark background for the whole month
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, endDeg, CYBER_DARK);
+      
+      // Calculate how much to fill
+      float progress = (float)(dayOfMonth + 1) / daysInMonth[m];
+      float span = endDeg - startDeg;
+      float fillEnd = startDeg + (span * progress);
+      
+      // Draw the filled portion in Accent Color (Pink/Blue)
+      // Note: If day is 0, we might draw a tiny dot, which is fine.
+      drawSausageSegment(cx, cy, radius, thickness, startDeg, fillEnd, CYBER_PINK);
+    }
+  }
+
+  // --- CENTER INFO ---
+  // Show Month Name or Date in center
+  const char* monthNames[] = {"JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"};
+  
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  
+  // Center text alignment logic
+  String mName = String(monthNames[currentMonth]);
+  int16_t x1, y1; 
+  uint16_t w, h;
+  tft.getTextBounds(mName, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(cx - w/2, cy - h/2 - 2);
+  tft.print(mName);
+  
+  // Small day number below
+  tft.setTextSize(1);
+  tft.setTextColor(CYBER_LIGHT);
+  tft.setCursor(cx - 6, cy + 10);
+  tft.print(dayOfMonth + 1);
+}
 
 void loadSettings() {
   prefs.begin("cyber-conf", true); // Open "cyber-conf" namespace (Read Only)
@@ -2195,48 +2174,16 @@ void saveSettings() {
   forecastLoaded = false;
 }
 
-
-// Generic function to draw ANY list menu (Main, Settings, Sub-settings)
-void drawListMenu(const char* title, const char* items[], int count, int selIndex) {
-  tft.fillScreen(CYBER_BG);
-
-  // Title
-  tft.setTextSize(1);
-  tft.setTextColor(CYBER_LIGHT);
-  tft.setCursor(10, 10);
-  tft.print(title);
-
-  // Draw List Items
-  for (int i = 0; i < count; i++) {
-    int y = 32 + i * 18; // Spacing logic from your original menu
-    
-    if (i == selIndex) {
-      // Selected: Cyan Bar + Black Text
-      tft.fillRect(6, y - 2, 148, 14, CYBER_ACCENT);
-      tft.setTextColor(CYBER_BG);
-    } else {
-      // Unselected: Black BG + White Text
-      tft.fillRect(6, y - 2, 148, 14, CYBER_BG);
-      tft.setTextColor(ST77XX_WHITE);
-    }
-    
-    tft.setCursor(12, y);
-    tft.print(items[i]);
-  }
-  
-  // Optional: Draw Icons if needed
-  drawAlarmIcon(); 
-}
-
-
-
 void setScreenBrightness(int val) {
-  // In ESP32 Core 3.0+, we write to the PIN, not the channel
-  // val is 0-255
-  if (val < 5) val = 5; // Safety minimum
-  ledcWrite(TFT_BL, val);
+  #if HARDWARE_VERSION == 1
+    // Version 1: PWM Control
+    if (val > 0 && val < 5) val = 5;
+    ledcWrite(TFT_BL, val);
+  #else
+    // Version 2: Hardware fixed to VCC
+    // Do nothing (Software cannot control brightness)
+  #endif
 }
-
 
 // ========= SETUP =========
 void setup() {
@@ -2244,17 +2191,25 @@ void setup() {
   loadSettings();
   delay(1500);
 
-  pinMode(TFT_BL, OUTPUT);
+  // --- BACKLIGHT SETUP ---
+  #if HARDWARE_VERSION == 1
+    pinMode(TFT_BL, OUTPUT);
+    ledcAttach(TFT_BL, 5000, 8); // 5000 Hz, 8-bit resolution
+    setScreenBrightness(lcdBrightness);
+  #else
+    // Version 2: BLK is VCC, no setup needed.
+  #endif
 
-  ledcAttach(TFT_BL, 5000, 8); // 5000 Hz, 8-bit resolution
-  
-  setScreenBrightness(lcdBrightness); // Apply saved brightness
+  // --- ENCODER & BUTTON SETUP ---
+  pinMode(ENC_A_PIN, INPUT_PULLUP);
+  pinMode(ENC_B_PIN, INPUT_PULLUP);
 
-  pinMode(ENC_A_PIN,   INPUT_PULLUP);
-  pinMode(ENC_B_PIN,   INPUT_PULLUP);
-  pinMode(ENC_BTN_PIN, INPUT_PULLUP);
-  pinMode(KEY0_PIN,    INPUT_PULLUP);
+  #if HARDWARE_VERSION == 2
+    pinMode(ENC_BTN_PIN, INPUT_PULLUP);
+    pinMode(KEY0_PIN,    INPUT_PULLUP);
+  #endif
 
+  // --- PERIPHERALS ---
   pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZ_PIN, OUTPUT);
 
@@ -2270,34 +2225,69 @@ void setup() {
   if (!aht.begin()) Serial.println("AHT21 not found");
   if (!ens160.begin()) Serial.println("ENS160 begin FAIL");
   else ens160.setMode(ENS160_OPMODE_STD);
-
   updateEnvSensors(true);
 
-  // khởi động vào Monitor (clock)
+  // Start in Monitor Mode
   initClockStaticUI();
   prevTimeStr = "";
   drawClockTime(getTimeStr('H'), getTimeStr('M'), getTimeStr('S'));
   drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
 }
 
+
+
 // ========= LOOP =========
 void loop() {
-  // 1. Read Inputs
-  int encStep     = readEncoderStep();
-  bool encPressed = checkButtonPressed(ENC_BTN_PIN, lastEncBtn);
-  bool k0Pressed  = checkButtonPressed(KEY0_PIN,    lastKey0);
+  
 
-  // --- HANDLE SCREEN TIMEOUT & WAKE ---
-  // If any input is detected, reset the timer and wake the screen
+  // 1. Read Inputs
+  int encStep = readEncoderStep();
+  
+  // --- UNIFIED BUTTON LOGIC ---
+  bool encPressed = false;
+  bool k0Pressed  = false;
+  
+  // Use the new helper that detects HW version automatically
+  int reading = getRawInputState();
+  
+  // Only act if state has changed and debounce time passed
+  if (reading != lastBtnState && (millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    lastDebounceTime = millis();
+    // Trigger ONLY when we press down (Transition from NONE to BTN)
+    if (lastBtnState == STATE_NONE) {
+      if (reading == STATE_PUSH) encPressed = true;
+      if (reading == STATE_K0)   k0Pressed  = true;
+    }
+    lastBtnState = reading;
+  }
+  // -------------------------------
+
+  
+  
+
+  //V2
+  
   if (encStep != 0 || encPressed || k0Pressed) {
+    
+    // --- DEBUG: Print why the timer is resetting ---
+    // This prints only if the screen was idle for more than 2 seconds
+    if (millis() - lastInteractionTime > 2000) { 
+        Serial.print("Screen Awake reset by: ");
+        if (encStep != 0) Serial.print("Encoder Move ");
+        if (encPressed)   Serial.print("Button Push ");
+        if (k0Pressed)    Serial.print("Button K0 ");
+        Serial.println();
+    }
+    // -----------------------------------------------
+
     lastInteractionTime = millis();
+    
     if (displayIsOff) {
       displayIsOff = false;
-      setScreenBrightness(lcdBrightness); // Restore saved brightness
-      
-      // Optional: Consume the click so it wakes the screen but doesn't trigger an action immediately
-      // If you prefer the first click to also do something, remove the line below.
-      if (encPressed) encPressed = false; 
+      setScreenBrightness(lcdBrightness);
+      // Optional: Consume the wake-up click so it doesn't trigger an action
+      if (encPressed) encPressed = false;
+      if (k0Pressed) k0Pressed = false; 
     }
   }
 
@@ -2337,15 +2327,12 @@ void loop() {
         } else if (menuIndex == 1) { // POMODORO Selected
           currentMode = MODE_POMODORO;
           
-          // --- FIX: Use NEW variables, delete the OLD ones ---
-          pomoState = STATE_READY;  // We use STATE_READY, not POMO_SELECT
-          
-          // Ensure timer has a value if it's the first time running
+          // Reset or Keep state? 
+          // Usually better to keep state if paused, but reset if done.
+          // For now, let's just ensure defaults if it's the first run.
           if (pomoCurrentSec == 0) pomoCurrentSec = workDurationSec;
-          drawPomodoroScreen(true);
-          
-          // Draw the screen
-          drawPomodoroScreen(true);
+    
+          drawPomodoroScreen(true); // Force full draw
         } else if (menuIndex == 2) {
           currentMode = MODE_ALARM;
           alarmSelectedField = 0;
@@ -2353,24 +2340,28 @@ void loop() {
         } else if (menuIndex == 3) {
           currentMode = MODE_DVD;
           dvdInited = false;
-        } else if (menuIndex == 4) { // Word of Day
+        } else if (menuIndex == 4) {
+          currentMode = MODE_DAY_COUNTER;
+        } else if (menuIndex == 5) { // Word of Day
           currentMode = MODE_WORD;
           // Fetch only if never loaded or stale (> 4 hours)
           if (!wotdLoaded || millis() - lastWotdFetch > 14400000) {
           tft.fillScreen(CYBER_BG);
+          tft.setTextSize(1);
           tft.setCursor(10,60); tft.print("Fetching...");
           fetchWordOfDay();
           lastWotdFetch = millis();
           }
           drawWordScreen(0,true);
-        } else if (menuIndex == 5) { // Settings
+        } else if (menuIndex == 6) { // Settings
           currentMode = MODE_SETTINGS;
           settingsState = SET_MAIN; // Always start at top
           setMainIndex = 0;         // Reset cursor
+          settingsMenuScroll = 0;
           
           // Draw the initial screen immediately
-          const char* initialItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
-          drawListMenu("SETTINGS", initialItems, 4, 0);
+          const char* initialItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update" };
+          drawListMenu("SETTINGS", initialItems, 6, 0);
         }
       }
       break;
@@ -2404,7 +2395,9 @@ void loop() {
         else if (clockPage == 1) {
           // --- PAGE 1: WEATHER ---
           if (!weatherLoaded || millis() - lastWeatherFetch > 900000) {
-             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Weather...");
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); 
+             tft.setTextSize(1);
+             tft.print("Fetching Weather...");
              fetchWeather(); 
              lastWeatherFetch = millis();
              tft.fillScreen(CYBER_BG); 
@@ -2414,7 +2407,9 @@ void loop() {
         else {
           // --- PAGE 2: GRAPH ---
           if (!forecastLoaded || millis() - lastWeatherFetch > 900000) { 
-             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); tft.print("Fetching Forecast...");
+             tft.setCursor(10, 60); tft.setTextColor(CYBER_LIGHT); 
+             tft.setTextSize(1);
+             tft.print("Fetching Forecast...");
              fetchWeather(); 
              lastWeatherFetch = millis();
              tft.fillScreen(CYBER_BG);
@@ -2463,14 +2458,15 @@ void loop() {
       unsigned long now = millis();
 
       // --- 1. HANDLE BUTTON (Click vs Long Press) ---
+      // We check the ANALOG state now, because digitalRead fails with the resistor setup.
       static unsigned long btnDownStart = 0;
       static bool longPressHandled = false;
       
-      // We read the pin directly for Long Press logic
-      bool btnState = digitalRead(ENC_BTN_PIN);
-      
-      if (btnState == LOW) { // Button IS Pressed
-        if (btnDownStart == 0) btnDownStart = now; // Just pressed
+      // Use the helper function instead of digitalRead
+      int pState = getRawInputState();
+
+      if (pState == STATE_PUSH) { // Button Pressed (Analog < 500)
+        if (btnDownStart == 0) btnDownStart = now; // Mark start time
         
         // CHECK FOR LONG PRESS RESET (> 3000ms)
         if (!longPressHandled && (now - btnDownStart > 3000)) {
@@ -2480,18 +2476,20 @@ void loop() {
            pomoStep = 1;
            pomoCurrentSec = workDurationSec;
            pomoAlarmActive = false;
-           longPressHandled = true; // Prevent multiple resets
+           longPressHandled = true; // Prevent re-triggering until release
            
-           // Visual Feedback
+           // Visual/Audio Feedback
            tft.fillScreen(CYBER_BG);
+           tft.setCursor(50, 60);
+           tft.setTextColor(ST77XX_RED);
            tft.setTextSize(1);
-           tft.setCursor(50, 60); tft.setTextColor(ST77XX_RED); tft.print("RESET!");
+           tft.print("RESET!");
            tone(BUZZ_PIN, 1000, 500);
            delay(1000);
-           drawPomodoroScreen(true);
+           drawPomodoroScreen(true); // Force full draw
         }
       } 
-      else { // Button IS Released
+      else { // Button Released (STATE_NONE or STATE_K0)
         if (btnDownStart != 0) {
            // If we didn't handle a long press, it's a CLICK
            if (!longPressHandled) {
@@ -2504,26 +2502,27 @@ void loop() {
               }
               needDraw = true;
            }
+           // Reset flags
            btnDownStart = 0;
            longPressHandled = false;
         }
       }
 
       // --- 2. HANDLE ENCODER (Adjust Time) ---
-      // Only allow adjustment if STATE_READY
+      // Only allow adjustment if STATE_READY (not PAUSED/RUNNING)
       if (pomoState == STATE_READY && encStep != 0) {
-         long adjustment = encStep * 60; // 1 click = 1 minute
-         
+         long adjustment = encStep * 30; // 30 second jumps
          if (pomoPhase == PHASE_WORK) {
             workDurationSec += adjustment;
             if (workDurationSec < 60) workDurationSec = 60; 
             if (workDurationSec > 3600) workDurationSec = 3600; 
-            pomoCurrentSec = workDurationSec;
-         } else {
+            pomoCurrentSec = workDurationSec; // Update immediately
+         } 
+         else {
             breakDurationSec += adjustment;
             if (breakDurationSec < 30) breakDurationSec = 30;
             if (breakDurationSec > 1800) breakDurationSec = 1800;
-            pomoCurrentSec = breakDurationSec;
+            pomoCurrentSec = breakDurationSec; // Update immediately
          }
          needDraw = true;
       }
@@ -2556,10 +2555,9 @@ void loop() {
         }
       }
 
-      // --- 4. ALARM BEEP ---
+      // --- 4. ALARM ---
       if (pomoAlarmActive) {
         if (now - pomoAlarmStart < 2000) { 
-           // Beep pattern
            if ((now / 200) % 2 == 0) {
              digitalWrite(LED_PIN, HIGH);
              tone(BUZZ_PIN, 2000);
@@ -2568,7 +2566,6 @@ void loop() {
              noTone(BUZZ_PIN);
            }
         } else {
-           // Stop Alarm
            pomoAlarmActive = false;
            digitalWrite(LED_PIN, LOW);
            noTone(BUZZ_PIN);
@@ -2578,7 +2575,7 @@ void loop() {
 
       if (needDraw) drawPomodoroScreen(false);
 
-      // Exit Button (K0)
+      // Exit (Uses the K0 press detected in the main loop)
       if (k0Pressed) {
         currentMode = MODE_MENU;
         drawMenu();
@@ -2648,14 +2645,14 @@ void loop() {
     case MODE_SETTINGS: {
       // --- STATE 1: TOP LEVEL ---
       if (settingsState == SET_MAIN) {
-        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" }; 
+        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout","Reset WiFi", "Sys Update"}; 
         bool changed = false;
 
         // Navigation
         if (encStep != 0) {
           setMainIndex += encStep;
-          if (setMainIndex < 0) setMainIndex = 3;
-          if (setMainIndex > 3) setMainIndex = 0;
+          if (setMainIndex < 0) setMainIndex = 5;
+          if (setMainIndex > 5) setMainIndex = 0;
           changed = true;
         }
 
@@ -2672,22 +2669,47 @@ void loop() {
              const char* items[] = { "Always Off", "Always On", "Blinking" };
              drawListMenu("LED MODE", items, 3, setSubIndex);
           } else if (setMainIndex == 2) {
-             // BRIGHTNESS (Slider Logic)
-             settingsState = SET_BRT;
-             tft.fillScreen(CYBER_BG);
-             tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
-             tft.setCursor(60, 60); tft.setTextSize(3); tft.print(lcdBrightness);
-          } else {
+            // BRIGHTNESS (Slider Logic)
+            settingsState = SET_BRT;
+            tft.fillScreen(CYBER_BG);
+            tft.setTextSize(1);
+            tft.setCursor(10, 10); 
+            tft.setTextColor(CYBER_LIGHT); 
+            tft.print("BRIGHTNESS");
+     
+             // --- DRAW INITIAL BAR ---
+            // Draw Outline
+            tft.drawRect(18, 58, 124, 14, ST77XX_WHITE);
+            // Calculate Width (Map 0-255 to 0-120 pixels)
+            int w = map(lcdBrightness, 0, 255, 0, 120);
+            // Draw Fill
+            tft.fillRect(20, 60, w, 10, CYBER_ACCENT);
+            
+          } else if (setMainIndex == 3){
              // TIMEOUT
              settingsState = SET_TIMEOUT;
              setSubIndex = displayTimeoutMode;
              const char* items[] = { "Always On", "15 Seconds", "30 Seconds", "60 Seconds" };
              drawListMenu("TIMEOUT", items, 4, setSubIndex);
+          } else if (setMainIndex == 4) { // <--- ADD THIS BLOCK
+            settingsState = SET_WIFI;
+            setSubIndex = 0; // Default to "Back"
+            const char* items[] = { "Back", "Launch Portal" };
+            drawListMenu("RESET WIFI?", items, 2, 0);
+          } else if (setMainIndex == 5) { // <--- NEW BLOCK
+            // Ask for confirmation
+            settingsState = SET_MAIN; // Return state just in case
+    
+            const char* confirmItems[] = { "Cancel", "Update Now" };
+            // Simple mini-menu or just jump straight to it. 
+            // For simplicity, let's just run it:
+            updateSystem(); 
+            return;
           }
           return; 
         }
 
-        if (changed) drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+        if (changed) drawListMenu("SETTINGS", mainItems, 6, setMainIndex, &settingsMenuScroll);
       } 
       
       // --- STATE 2: LOCATION SUB-MENU ---
@@ -2710,8 +2732,8 @@ void loop() {
           }
           // Auto-Back to Main
           settingsState = SET_MAIN;
-          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
-          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update"};
+          drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
           return;
         }
         if (changed) drawListMenu("SELECT CITY", locItems, 3, setSubIndex);
@@ -2737,8 +2759,8 @@ void loop() {
           }
           // Auto-Back to Main
           settingsState = SET_MAIN;
-          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
-          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" , "Reset Wifi", "Sys Update"};
+          drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
           return;
         }
         if (changed) drawListMenu("LED MODE", ledItems, 3, setSubIndex);
@@ -2754,17 +2776,22 @@ void loop() {
           setScreenBrightness(lcdBrightness); 
           
           // Redraw Value
-          tft.fillScreen(CYBER_BG);
-          tft.setTextSize(1); tft.setCursor(10, 10); tft.setTextColor(CYBER_LIGHT); tft.print("BRIGHTNESS");
-          tft.setTextSize(3); tft.setCursor(50, 60); tft.setTextColor(ST77XX_WHITE);
-          tft.print(map(lcdBrightness, 0, 255, 0, 100)); tft.print("%");
+          tft.fillRect(20, 60, 120, 10, CYBER_BG); 
+
+          // Re-Calculate and Draw New Fill
+          int w = map(lcdBrightness, 0, 255, 0, 120);
+          tft.fillRect(20, 60, w, 10, CYBER_ACCENT);
+    
+          // Optional: Re-draw outline just in case
+          tft.drawRect(18, 58, 124, 14, ST77XX_WHITE);
+
         }
 
         if (encPressed) {
           saveSettings();
           settingsState = SET_MAIN;
-          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
-          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update" };
+          drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
           return;
         }
       }
@@ -2789,20 +2816,152 @@ void loop() {
           }
           // Auto-Back to Main
           settingsState = SET_MAIN;
-          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update"};
           drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
           return;
         }
         if (changed) drawListMenu("TIMEOUT", tItems, 4, setSubIndex);
       }
+
+      // --- STATE 6: WIFI RESET ---
+ else if (settingsState == SET_WIFI) {
+  const char* wItems[] = { "Back", "Launch Portal" };
+  bool changed = false;
+
+  if (encStep != 0) {
+    setSubIndex += encStep;
+    if (setSubIndex < 0) setSubIndex = 1;
+    if (setSubIndex > 1) setSubIndex = 0;
+    changed = true;
+  }
+
+  if (encPressed) {
+    if (setSubIndex == 0) {
+      // User selected "Back"
+      settingsState = SET_MAIN;
+      const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi" ,"Sys Update"};
+      drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
+      return;
+    } else {
+      // User selected "Launch Portal"
+      tft.fillScreen(CYBER_BG);
+      tft.setCursor(10, 60);
+      tft.setTextColor(CYBER_ACCENT);
+      tft.print("Stopping WiFi...");
+      
+      // 1. Disconnect current WiFi
+      WiFi.disconnect();
+      delay(500);
+
+      // 2. Setup WiFiManager (Same CSS as setup)
+      WiFiManager wm;
+      
+      // --- PASTE YOUR CSS HERE (Reusing your existing style) ---
+      //const char* customCSS = "<style>body{background-color:#000000;color:#FFFFFF;font-family:'Courier New';}h1{color:#00FFFF;}button{background-color:#000000;color:#00FFFF;border:2px solid #00FFFF;}input{background-color:#1a1a1a;color:#FFFFFF;border:1px solid #00FFFF;}</style>";
+      const char* customCSS = 
+   "<style>"
+     "body {"
+      "background-color: #000000;"
+      "color: #FFFFFF;"
+      "font-family: 'Courier New', Courier, monospace;" // Retro font
+    "}"
+    // --- FIX 1: HIDE THE EXTRA WHITE TEXT ---
+    "h3 { display: none !important; }"
+    "img {"
+      "background-color: #00FFFF;"  /* Cyan background */
+      "padding: 2px;"                /* Little bit of spacing */
+      "vertical-align: middle;"      /* Aligns icon with text */
+      "border: 1px solid #00FFFF;"   /* Optional: Green border for detail */
+    "}"
+
+  /* --- NEW: FIX FOR INVISIBLE WIFI NAMES --- */
+    "a {"
+      "color: #00FFFF;"       /* CYAN color for Wi-Fi Network names */
+      "text-decoration: none;"
+    "}"
+    "a:hover {"
+      "color: #FF00FF;"       /* PINK when you touch/hover them */
+    "}"
+    /* ---------------------------------------- */
+
+    "h1 {"
+      "color: #00FFFF;"       // Cyan Header
+      "text-shadow: 2px 2px #FF00FF;" // Pink shadow for 'glitch' effect
+    "}"
+    "button {"
+      "background-color: #000000;"
+      "color: #00FFFF;"
+      "border: 2px solid #00FFFF;"
+      "border-radius: 0px;"   // Sharp corners
+      "padding: 10px;"
+      "font-weight: bold;"
+      "text-transform: uppercase;"
+    "}"
+    "button:hover {"
+      "background-color: #00FFFF;"
+      "color: #000000;"
+    "}"
+    "input {"
+      "background-color: #1a1a1a;"
+      "color: #FFFFFF;"
+      "border: 1px solid #00FFFF;"
+      "border-radius: 0px;"
+      "padding: 5px;"
+    "}"
+    "div, p, form { text-align: left; }" // Center align everything
+    
+    // Add this to hide the "No AP set" status box at the bottom
+    ".mw { display: none; }"
+    
+    // ... end of style ...
+    "</style>";
+      wm.setCustomHeadElement(customCSS);
+      wm.setTitle("Ambrogio");
+      wm.setAPCallback(configModeCallback); // Re-use your callback for the screen text
+
+      // 3. Start Portal (Blocking Call)
+      // This will pause code execution until user connects or timeout
+      bool res = wm.startConfigPortal(AP_SSID, AP_PASSWORD);
+
+      if (res) {
+        // Success: User connected to new network
+        tft.fillScreen(CYBER_BG);
+        tft.setCursor(10, 60);
+        tft.setTextColor(CYBER_GREEN);
+        tft.print("Success! Saving...");
+        saveCurrentNetwork(); // Save to your preferences
+        delay(2000);
+        ESP.restart(); // Restart to apply everything cleanly
+      } else {
+        // Failed / Timeout
+        tft.fillScreen(CYBER_BG);
+        tft.setCursor(10, 60);
+        tft.setTextColor(ST77XX_RED);
+        tft.print("Timed Out / Failed");
+        delay(2000);
+        
+        // Return to menu
+        settingsState = SET_MAIN;
+        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update" };
+        drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
+      }
+      return;
+    }
+  }
+  if (changed) drawListMenu("RESET WIFI?", wItems, 2, setSubIndex);
+
+  
+}
+
+ 
       
       // --- EXIT / BACK LOGIC (K0 Button) ---
       if (k0Pressed) {
         if (settingsState != SET_MAIN) {
           // If in sub-menu, cancel and go back
           settingsState = SET_MAIN;
-          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout" };
-          drawListMenu("SETTINGS", mainItems, 4, setMainIndex);
+          const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout","Reset WiFi" , "Sys Update"};
+          drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
         } else {
           // If in Main Settings, exit to Clock Menu
           currentMode = MODE_MENU;
@@ -2848,9 +3007,47 @@ void loop() {
       break;
     }
   
-  
+    case MODE_DAY_COUNTER: {
+      static int viewPage = 0;      // 0 = Grid, 1 = Circle
+      static int prevViewPage = -1; // Force initial draw
 
-  
-  
+      // 1. Handle Encoder for Tab Switching
+      if (encStep != 0) {
+        viewPage += encStep;
+        if (viewPage < 0) viewPage = 0;
+        if (viewPage > 1) viewPage = 1; // Only 2 pages for now
+      }
+
+      // 2. Draw ONLY if page changed (Efficient!)
+      if (viewPage != prevViewPage) {
+        prevViewPage = viewPage;
+
+        // Get Time Data
+        struct tm timeinfo;
+        if (!getLocalTime(&timeinfo)) {
+          tft.fillScreen(CYBER_BG);
+          tft.setCursor(10, 50);
+          tft.setTextColor(ST77XX_RED);
+          tft.print("Sync Time First!");
+        } else {
+          int year = timeinfo.tm_year + 1900;
+          int dayIdx = timeinfo.tm_yday; // 0..365
+          int total = isLeap(year) ? 366 : 365;
+
+          if (viewPage == 0) drawYearGrid(dayIdx, total);
+          else               drawYearCircle(dayIdx, total);
+        }
+      }
+
+      // 3. Exit to Menu
+      if (k0Pressed) {
+        currentMode = MODE_MENU;
+        viewPage = 0;     // Reset to default tab
+        prevViewPage = -1; // Reset dirty flag
+        drawMenu();
+      }
+      break;
+    }
+
   }
 }
