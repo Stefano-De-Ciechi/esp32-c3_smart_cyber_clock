@@ -21,10 +21,16 @@ Preferences prefs;
 // ==========================================
 // ======== HARDWARE CONFIGURATION ==========
 // ==========================================
-// CHANGE THIS VARIABLE:
-// 1 = Original (BLK=10, A=20, B=21, Buttons=Analog 0)
-// 2 = New (BLK=VCC, A=10, B=20, EncBtn=21, K0=0)
-#define HARDWARE_VERSION  1
+
+
+#define ANALOG_LADDER 1
+#define ORIGINAL 2
+
+
+
+// CAHNGE THIS !!!!!!!!
+#define HARDWARE_VERSION  ORIGINAL
+
 // ==========================================
 
 // ====== FIXED PINS (Unchanged) ======
@@ -39,7 +45,7 @@ Preferences prefs;
 #define BUZZ_PIN 3
 
 // ====== VERSION SPECIFIC PIN MAPPING ======
-#if HARDWARE_VERSION == 1
+#if HARDWARE_VERSION == ANALOG_LADDER
   // --- VERSION 1: ANALOG BUTTONS + PWM BACKLIGHT ---
   #define TFT_BL       10  // PWM Controlled Backlight
   #define ENC_A_PIN    20
@@ -163,7 +169,7 @@ const int DEBOUNCE_DELAY = 50;
 // --- UNIFIED BUTTON READING LOGIC (New Helper Function) ---
 // ---------------------------------------------------------
 int getRawInputState() {
-  #if HARDWARE_VERSION == 1
+  #if HARDWARE_VERSION == ANALOG_LADDER
     // --- ORIGINAL ANALOG LOGIC ---
     int val = analogRead(BTN_PIN);
     if (val < 800) return STATE_PUSH;
@@ -183,7 +189,7 @@ int getRawInputState() {
 
 // Helper to read inputs based on Hardware Version
 int readAnalogButtonState() {
-  #if HARDWARE_VERSION == 1
+  #if HARDWARE_VERSION == ANALOG_LADDER
     // --- VERSION 1: ANALOG LOGIC (Pin 0) ---
     int val = analogRead(BTN_PIN);
     if (val < 800) return STATE_PUSH;           // Button Pressed
@@ -1140,6 +1146,12 @@ void updateSystem() {
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   // 3. Start Update
   // This will BLOCK until finished or failed
+  #if HARDWARE_VERSION == ANALOG_LADDER
+    #define FW_URL URL1
+  #else 
+    #define FW_URL URL2
+  #endif
+
   t_httpUpdate_return ret = httpUpdate.update(client, FW_URL);
 
   // 4. Handle Result
@@ -2175,7 +2187,7 @@ void saveSettings() {
 }
 
 void setScreenBrightness(int val) {
-  #if HARDWARE_VERSION == 1
+  #if HARDWARE_VERSION == ANALOG_LADDER
     // Version 1: PWM Control
     if (val > 0 && val < 5) val = 5;
     ledcWrite(TFT_BL, val);
@@ -2192,7 +2204,7 @@ void setup() {
   delay(1500);
 
   // --- BACKLIGHT SETUP ---
-  #if HARDWARE_VERSION == 1
+  #if HARDWARE_VERSION == ANALOG_LADDER
     pinMode(TFT_BL, OUTPUT);
     ledcAttach(TFT_BL, 5000, 8); // 5000 Hz, 8-bit resolution
     setScreenBrightness(lcdBrightness);
@@ -2204,7 +2216,7 @@ void setup() {
   pinMode(ENC_A_PIN, INPUT_PULLUP);
   pinMode(ENC_B_PIN, INPUT_PULLUP);
 
-  #if HARDWARE_VERSION == 2
+  #if HARDWARE_VERSION == ORIGINAL
     pinMode(ENC_BTN_PIN, INPUT_PULLUP);
     pinMode(KEY0_PIN,    INPUT_PULLUP);
   #endif
