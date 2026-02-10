@@ -21,19 +21,15 @@ Preferences prefs;
 // ==========================================
 // ======== HARDWARE CONFIGURATION ==========
 // ==========================================
-
-
-#define ANALOG_LADDER 1
-#define ORIGINAL 2
-
-
+#define ANALOG_LADDER 1     // for modified version (uses only 3 pins and a 10K resistor to control both buttons of the LCD display)
+#define ORIGINAL 2          // for original version (4 pins for both buttons)
 
 // CAHNGE THIS !!!!!!!!
-#define HARDWARE_VERSION  ORIGINAL
+#define HARDWARE_VERSION ORIGINAL
 
 // ==========================================
 
-// ====== FIXED PINS (Unchanged) ======
+// ====== STANDARD PINS ======
 #define TFT_CS   9
 #define TFT_DC   8
 #define TFT_RST  7
@@ -44,21 +40,19 @@ Preferences prefs;
 #define LED_PIN  4
 #define BUZZ_PIN 3
 
-// ====== VERSION SPECIFIC PIN MAPPING ======
+// ====== VERSION SPECIFIC PINS MAPPING ======
 #if HARDWARE_VERSION == ANALOG_LADDER
-  // --- VERSION 1: ANALOG BUTTONS + PWM BACKLIGHT ---
   #define TFT_BL       10  // PWM Controlled Backlight
   #define ENC_A_PIN    20
   #define ENC_B_PIN    21
   
   // Buttons (Analog Mux)
-  #define BTN_PIN      0   
+  #define BTN_PIN      0
   // (Digital pins not used for buttons in V1)
-  #define ENC_BTN_PIN  -1  
+  #define ENC_BTN_PIN  -1
   #define KEY0_PIN     -1
 
-#else
-  // --- VERSION 2: DIGITAL BUTTONS + FIXED BACKLIGHT ---
+#else   // ORIGINAL (DIGITAL BUTTONS + FIXED BACKLIGHT)
   #define TFT_BL       -1  // Not used (Connected to VCC)
   #define ENC_A_PIN    10
   #define ENC_B_PIN    20
@@ -70,23 +64,15 @@ Preferences prefs;
 #endif
 
 // ====== Weather Settings ======
-// ... (The rest of your code continues normally from here)
-
-// ====== Weather Settings ======
 String weatherKey = WEATHER_API_KEY;
 String city       = WEATHER_API_CITY;
 
-// Variables to store data
+// store data
 float outTemp = 0.0;
 int   outHum  = 0;
 String outDesc = "--";
 unsigned long lastWeatherFetch = 0;
 bool weatherLoaded = false;
-
-// ====== WiFi & Time config ======
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec      = 1 * 3600;
-const int   daylightOffset_sec = 0;
 
 // ====== Forecast Data ======
 float fTemps[6];
@@ -94,7 +80,12 @@ bool  fRain[6];
 int   fHours[6];
 bool  forecastLoaded = false;
 
-// ====== NEW: WORD OF THE DAY (WotD) ======
+// ====== WiFi & Time config ======
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec      = 1 * 3600;
+const int   daylightOffset_sec = 0;
+
+// ====== WORD OF THE DAY (WotD) ======
 String wotdWord = "Loading...";
 String wotdDef  = "";
 bool   wotdLoaded = false;
@@ -102,16 +93,20 @@ unsigned long lastWotdFetch = 0;
 int  wotdContentHeight = 0;
 
 // ====== SETTINGS CONFIG ======
+
 // 1. LOCATIONS
 struct City {
   const char* name;
   const char* query; 
 };
+
 const City myLocations[3] = {
   { "Samarate", "Samarate,IT" },  
   { "Magenta",    "Magenta,IT" },
   { "Zurigo",   "Zurich,CH" }
+  // ADD others
 };
+
 int locationIndex = 0; 
 
 // 2. LED MODES
@@ -132,20 +127,22 @@ enum SettingsState {
   SET_TIMEOUT,   
   SET_WIFI
 };
+
 SettingsState settingsState = SET_MAIN;
 int setMainIndex = 0; 
 int setSubIndex  = 0;
 
-// 3. BRIGHTNESS
+// 3. BRIGHTNESS (works only for ANALOG_LADDER hardware version)
 int lcdBrightness = 255;
 
-// 4. DISPLAY TIMEOUT
+// 4. DISPLAY TIMEOUT (works only for ANALOG_LADDER hardware version)
 enum DisplayTimeout {
   DISP_ALWAYS_ON = 0,
   DISP_15_SEC,
   DISP_30_SEC,
   DISP_60_SEC
 };
+
 int displayTimeoutMode = DISP_ALWAYS_ON;
 
 // Timing trackers
@@ -165,19 +162,17 @@ int lastBtnState = STATE_NONE;
 unsigned long lastDebounceTime = 0;
 const int DEBOUNCE_DELAY = 50;
 
-// ---------------------------------------------------------
-// --- UNIFIED BUTTON READING LOGIC (New Helper Function) ---
-// ---------------------------------------------------------
+// ------------------------------------
+// --- UNIFIED BUTTON READING LOGIC ---
+// ------------------------------------
 int getRawInputState() {
   #if HARDWARE_VERSION == ANALOG_LADDER
-    // --- ORIGINAL ANALOG LOGIC ---
     int val = analogRead(BTN_PIN);
-    if (val < 800) return STATE_PUSH;
+    if (val < 800)                return STATE_PUSH;
     if (val > 1200 && val < 3100) return STATE_K0;
     return STATE_NONE;
 
   #else
-    // --- NEW DIGITAL LOGIC ---
     // Assuming INPUT_PULLUP: LOW = Pressed, HIGH = Released
     if (digitalRead(ENC_BTN_PIN) == LOW) return STATE_PUSH;
     if (digitalRead(KEY0_PIN) == LOW)    return STATE_K0;
@@ -186,14 +181,12 @@ int getRawInputState() {
 }
 // ---------------------------------------------------------
 
-
 // Helper to read inputs based on Hardware Version
 int readAnalogButtonState() {
   #if HARDWARE_VERSION == ANALOG_LADDER
-    // --- VERSION 1: ANALOG LOGIC (Pin 0) ---
     int val = analogRead(BTN_PIN);
-    if (val < 800) return STATE_PUSH;           // Button Pressed
-    if (val > 1200 && val < 3100) return STATE_K0; // K0 Pressed
+    if (val < 800)                return STATE_PUSH;      // Button Pressed
+    if (val > 1200 && val < 3100) return STATE_K0;        // K0 Pressed
     return STATE_NONE;
 
   #else
@@ -209,7 +202,6 @@ int readAnalogButtonState() {
     return STATE_NONE;
   #endif
 }
-
 
 // ====== TFT & Sensors ======
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST); // hardware SPI
@@ -231,7 +223,7 @@ ScioSense_ENS160 ens160(0x53);   // ENS160 I2C address 0x53
 #define CYBER_DARK    0x4208
 #define RAIN 0x8cfe
 
-// --- NEW BACKGROUND COLORS (Dimmed for readability) ---
+// --- BACKGROUND COLORS (Dimmed for readability) ---
 #define BG_CLEAR      0x0000  // Keep Black for Clear (or use 0x0010 for very dark blue)
 #define BG_CLOUDS     0x2124  // Dark Grey
 #define BG_RAIN       0x0010  // Deep Navy Blue
@@ -253,7 +245,8 @@ enum UIMode {
   MODE_SETTINGS,
   MODE_WORD
 };
-UIMode currentMode = MODE_CLOCK;       // khởi động vào CLOCK luôn
+
+UIMode currentMode = MODE_CLOCK;
 int menuIndex = 0;
 const int MENU_ITEMS = 7;       // Monitor, Pomodoro, Alarm, DVD, Day Counter, Word of the day, Settings 
 
@@ -315,6 +308,7 @@ enum AlertLevel {
   ALERT_CO2,
   ALERT_ALARM
 };
+
 AlertLevel currentAlertLevel = ALERT_NONE;
 unsigned long lastLedToggleMs = 0;
 bool ledState = false;
@@ -351,11 +345,9 @@ bool checkButtonPressed(uint8_t pin, bool &lastState) {
 }
 
 // ========= Alarm icon =========
-// Now accepts a background color (defaults to Black if not specified)
 void drawAlarmIcon(uint16_t bgColor = CYBER_BG) {
   int x = 148;
   
-  // Use 'bgColor' instead of CYBER_BG to clear the area
   tft.fillRect(x - 10, 0, 12, 12, bgColor); 
 
   if (!alarmEnabled) return;
@@ -395,7 +387,7 @@ void configModeCallback(WiFiManager *myWiFiManager) {
   tft.println("   to input Pass");
 }
 
-// ========== HELPERS ==============
+// ========== WiFi HELPERS ==============
 
 // Load up to 3 saved networks from memory into WiFiMulti
 void loadWiFiList() {
@@ -478,7 +470,8 @@ void connectWiFiAndSyncTime() {
   
   // Try to connect for ~5-6 seconds
   bool connected = false;
-  // We loop a few times; wifiMulti.run() picks the best available network
+
+  // loop a few times; wifiMulti.run() picks the best available network
   for (int i = 0; i < 6; i++) { 
     if (wifiMulti.run() == WL_CONNECTED) {
       connected = true;
@@ -497,35 +490,33 @@ void connectWiFiAndSyncTime() {
     delay(1000);
 
     WiFiManager wm;
-    // Inject your Custom CSS here (copy your working CSS string from before)
-   const char* customCSS = 
-   "<style>"
+
+    // Inject Custom CSS here
+    const char* customCSS = 
+    "<style>"
      "body {"
       "background-color: #000000;"
       "color: #FFFFFF;"
       "font-family: 'Courier New', Courier, monospace;" // Retro font
     "}"
-    // --- FIX 1: HIDE THE EXTRA WHITE TEXT ---
     "h3 { display: none !important; }"
     "img {"
-      "background-color: #00FFFF;"  /* Cyan background */
-      "padding: 2px;"                /* Little bit of spacing */
-      "vertical-align: middle;"      /* Aligns icon with text */
-      "border: 1px solid #00FFFF;"   /* Optional: Green border for detail */
+      "background-color: #00FFFF;"
+      "padding: 2px;"
+      "vertical-align: middle;"
+      "border: 1px solid #00FFFF;"
     "}"
 
-  /* --- NEW: FIX FOR INVISIBLE WIFI NAMES --- */
     "a {"
-      "color: #00FFFF;"       /* CYAN color for Wi-Fi Network names */
+      "color: #00FFFF;"
       "text-decoration: none;"
     "}"
     "a:hover {"
-      "color: #FF00FF;"       /* PINK when you touch/hover them */
+      "color: #FF00FF;"
     "}"
-    /* ---------------------------------------- */
 
     "h1 {"
-      "color: #00FFFF;"       // Cyan Header
+      "color: #00FFFF;"
       "text-shadow: 2px 2px #FF00FF;" // Pink shadow for 'glitch' effect
     "}"
     "button {"
@@ -548,9 +539,8 @@ void connectWiFiAndSyncTime() {
       "border-radius: 0px;"
       "padding: 5px;"
     "}"
-    "div, p, form { text-align: left; }" // Center align everything
+    "div, p, form { text-align: left; }"
     
-    // Add this to hide the "No AP set" status box at the bottom
     ".mw { display: none; }"
     
     // ... end of style ...
@@ -643,7 +633,7 @@ const int GRID_MID = 80;
 const int GRID_BOT = 104;
 const int GRID_MID_X = (GRID_L + GRID_R) / 2;
 
-// Y cho label / value (text size 1, cao ~8px)
+// Y label / value (text size 1, ~8px)
 const int TOP_LABEL_Y    = GRID_TOP + 4;   // 60
 const int TOP_VALUE_Y    = GRID_TOP + 15;  // 71
 const int BOTTOM_LABEL_Y = GRID_MID + 4;   // 84
@@ -656,7 +646,6 @@ const int BAR_Y        = 110;
 const int BAR_H        = 6;
 const int BAR_W        = (160 - 2 * BAR_MARGIN_X - 3 * BAR_GAP) / 4; // 37
 
-// In text căn giữa trong khoảng [x0, x1]
 void printCenteredText(const String &txt,
                        int x0, int x1,
                        int y,
@@ -696,7 +685,6 @@ void initClockStaticUI() {
   tft.drawFastHLine(GRID_L, GRID_BOT, GRID_R - GRID_L, ST77XX_WHITE);
   tft.drawFastVLine(GRID_MID_X, GRID_TOP, GRID_BOT - GRID_TOP, ST77XX_WHITE);
 
-  // Label căn giữa trong từng ô
   printCenteredText("HUMI", GRID_L,     GRID_MID_X, TOP_LABEL_Y,    ST77XX_WHITE, CYBER_BG, 1);
   printCenteredText("TEMP", GRID_MID_X, GRID_R,     TOP_LABEL_Y,    ST77XX_WHITE, CYBER_BG, 1);
   printCenteredText("TVOC", GRID_L,     GRID_MID_X, BOTTOM_LABEL_Y, ST77XX_WHITE, CYBER_BG, 1);
@@ -775,7 +763,6 @@ void drawEnvDynamic(float temp, float hum, uint16_t tvoc, uint16_t eco2) {
   // CO2 (ppm)
   drawCO2Value(eco2, colCO2);
 
-  // Thanh màu + tam giác
   uint8_t level = 1;
   if (eco2 > 1800) level = 4;
   else if (eco2 > 1200) level = 3;
@@ -790,11 +777,9 @@ void drawEnvDynamic(float temp, float hum, uint16_t tvoc, uint16_t eco2) {
                    ST77XX_WHITE);
 }
 
-// WORD OF THE DAY 
-// ====== WotD Helper Functions ======
+// ====== WORD OF THE DAY Helper Functions ======
 
 // Helper to replace Italian accents for standard display compatibility
-
 String fixAccents(String str) {
   str.replace("&quot;", "\"");
   str.replace("&rsquo;", "'");
@@ -974,7 +959,7 @@ void fetchWordOfDay() {
            }
 
            // --- UPDATED FILTER ---
-           // We ONLY filter out junk links. We KEEP quotes and "es."
+           // ONLY filter out junk links. KEEP quotes and "es."
            bool isJunk = false;
            
            if (line.indexOf("unaparolaalgiorno") != -1) isJunk = true;
@@ -1030,8 +1015,6 @@ void drawWordScreen(int scrollOffset, bool fullRedraw) {
     
     tft.setCursor(xPos, 5); 
     tft.print(wotdWord);
-    
-    // (Decorative line removed)
     
   } else {
     // --- PART 2: SCROLL CLEARING ---
@@ -1092,14 +1075,9 @@ void drawWordScreen(int scrollOffset, bool fullRedraw) {
       currentWord += c;
     }
   }
-
-  // (Arrows removed completely)
 }
 
-
-
-
-//REMOTE UPDATE
+// ===== REMOTE UPDATE =====
 void updateSystem() {
   tft.fillScreen(CYBER_BG);
   tft.setTextColor(CYBER_ACCENT);
@@ -1141,17 +1119,18 @@ void updateSystem() {
     }
   });
 
-
   // 3. IMPORTANT: Enable Redirects for GitHub
   httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  // 3. Start Update
-  // This will BLOCK until finished or failed
+
+  // set correct firmware binary path depending on hardware version (same release, two distinct binaries)
   #if HARDWARE_VERSION == ANALOG_LADDER
     #define FW_URL URL1
   #else 
     #define FW_URL URL2
   #endif
 
+  // 3. Start Update
+  // This will BLOCK until finished or failed
   t_httpUpdate_return ret = httpUpdate.update(client, FW_URL);
 
   // 4. Handle Result
@@ -1181,10 +1160,11 @@ void updateSystem() {
       break;
   }
 }
-  // Return to menu if failed
+
+// ===== Helper functions for menu drawing =====
+
 // Generic function to draw ANY list menu with support for SCROLLING
 // If currentScroll is NULL, it behaves like a static list (no scroll)
-
 void drawListMenu(const char* title, const char* items[], int count, int selIndex, int* currentScroll = NULL) {
   tft.fillScreen(CYBER_BG);
   
@@ -1253,10 +1233,6 @@ void drawListMenu(const char* title, const char* items[], int count, int selInde
   if (localScroll < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
 }
 
-
-
-
-
 // ========= Menu UI =========
 
 void drawMenu() {
@@ -1278,7 +1254,7 @@ void drawMenu() {
   };
 
   // --- 2. DRAW HEADER FIRST (Static Layer) ---
-  // We draw this first so it establishes the "do not touch" zone.
+  // draw this first so it establishes the "do not touch" zone.
   tft.fillRect(0, 0, 160, HEADER_HEIGHT, CYBER_BG);
   
   tft.setTextColor(CYBER_LIGHT, CYBER_BG);
@@ -1307,8 +1283,7 @@ void drawMenu() {
   if (menuScrollY < 0) menuScrollY = 0;
   if (menuScrollY > maxScroll) menuScrollY = maxScroll;
 
-
-  // --- 4. Draw Items (The Flicker Fix) ---
+  // --- 4. Draw Items ---
   int startY = HEADER_HEIGHT - menuScrollY;
 
   tft.setTextSize(1);
@@ -1342,7 +1317,6 @@ void drawMenu() {
   if (menuScrollY < maxScroll) tft.fillTriangle(150, 120, 154, 116, 146, 116, CYBER_ACCENT);
 }
 
-
 // ========= Pomodoro =========
 void drawPomodoroScreen(bool fullRedraw) {
   if (fullRedraw) {
@@ -1361,9 +1335,7 @@ void drawPomodoroScreen(bool fullRedraw) {
       tft.print("BREAK TIME");
     }
     
-    // --- 4. FOOTER (Only draw once) ---
-    // The footer info (Step count, Next break time) doesn't change 
-    // during the countdown, so we move it here to stop the flicker.
+    // --- 4. FOOTER (Only draw once as its content don't change) ---
     tft.fillRect(0, 108, 160, 20, CYBER_BG);
     tft.setTextSize(1);
     tft.setTextColor(CYBER_LIGHT, CYBER_BG);
@@ -1400,7 +1372,7 @@ void drawPomodoroScreen(bool fullRedraw) {
     tft.print("      "); 
   }
 
-  // --- 2. TIMER (The Anti-Flicker Fix) ---
+  // --- 2. TIMER ---
   int m = pomoCurrentSec / 60;
   int s = pomoCurrentSec % 60;
   char timeBuf[10];
@@ -1408,9 +1380,9 @@ void drawPomodoroScreen(bool fullRedraw) {
 
   tft.setTextSize(3);
   
-  // FIX: Calculate position based on "88:88" (Max Width) ONCE.
-  // This keeps the clock perfectly centered and stops it from jumping 
-  // left/right when narrow numbers like "1" appear.
+  // Calculate position based on "88:88" (Max Width) ONCE.
+  // keeps the clock perfectly centered and stops it from jumping 
+  // when narrow numbers like "1" appear.
   int16_t x1, y1; 
   uint16_t w, h;
   tft.getTextBounds("88:88", 0, 0, &x1, &y1, &w, &h); 
@@ -1613,7 +1585,7 @@ void initDvd() {
 
   drawAlarmIcon();
 
-  // vùng chạy logo: chừa header 16px
+  // logo (16px)
   dvdX = 40;
   dvdY = 40;
   dvdVX = 2;
@@ -1634,7 +1606,6 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
     return;
   }
 
-  // encoder chỉnh nhẹ tốc độ ngang
   if (encStep != 0) {
     int speed = abs(dvdVX) + encStep;
     if (speed < 1) speed = 1;
@@ -1646,14 +1617,11 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
   if (now - lastDvdMs < dvdInterval) return;
   lastDvdMs = now;
 
-  // xóa logo cũ
   tft.fillRoundRect(dvdX, dvdY, dvdW, dvdH, 4, CYBER_BG);
 
-  // update vị trí
   dvdX += dvdVX;
   dvdY += dvdVY;
 
-  // biên trong vùng màn
   int left   = 0;
   int right  = 160 - dvdW;
   int top    = 16;
@@ -1682,7 +1650,6 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
     hitY = true;
   }
 
-  // nếu đập vào góc (cả X & Y cùng va chạm) => đổi màu
   if (hitX && hitY) {
     dvdColorIndex++;
     if (dvdColorIndex >= (int)(sizeof(dvdColors) / sizeof(dvdColors[0]))) {
@@ -1694,7 +1661,7 @@ void updateDvd(int encStep, bool encPressed, bool backPressed) {
   drawDvdLogo(dvdX, dvdY, dvdColors[dvdColorIndex]);
 }
 
-//========= WHEATER STUF ===========
+// ========= WHEATER STUFF ===========
 void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1716,7 +1683,7 @@ void fetchWeather() {
     JsonDocument filter;
     filter["list"][0]["dt"] = true;
     filter["list"][0]["main"]["temp"] = true;
-    filter["list"][0]["main"]["humidity"] = true; // <--- ADDED THIS!
+    filter["list"][0]["main"]["humidity"] = true;
     filter["list"][0]["weather"][0]["main"] = true;
     filter["city"]["timezone"] = true;
 
@@ -1729,9 +1696,9 @@ void fetchWeather() {
       // --- 1. UPDATE CURRENT WEATHER VARIABLES ---
       // The first item in the list (index 0) is the forecast for "Now" (or very close to it)
       outTemp = doc["list"][0]["main"]["temp"];
-      outHum  = doc["list"][0]["main"]["humidity"]; // <--- Fixes the "0%" issue
+      outHum  = doc["list"][0]["main"]["humidity"];
       const char* d = doc["list"][0]["weather"][0]["main"];
-      outDesc = String(d);                            // <--- Fixes the "--" issue
+      outDesc = String(d);
       
       // --- 2. UPDATE GRAPH DATA (Points 0-5) ---
       
@@ -1753,12 +1720,10 @@ void fetchWeather() {
                                                       // Actually, strictly speaking, filter["list"][0] applies to ALL list items in ArduinoJson 7 usually, 
                                                       // but safely: the API returns list[0], list[1] etc. 
                                                       // We iterate 0 to 4 from the JSON list to fill graph 1 to 5.
-                                                      // Wait, we need to be careful with indices. 
-                                                      // Let's rely on standard parsing:
         
         float t = doc["list"][i]["main"]["temp"]; 
+
         // If the filter worked correctly, it applies the pattern to all array elements.
-        
         fTemps[i+1] = doc["list"][i]["main"]["temp"];
         const char* w = doc["list"][i]["weather"][0]["main"];
         String cond = String(w);
@@ -1801,7 +1766,6 @@ void drawWeatherScreen() {
   // 2. Header (Top Left)
   tft.setTextColor(ST77XX_WHITE, bgCol);
   tft.setTextSize(1);
-  //tft.setCursor(10, 5);
   tft.setCursor(4, 4);
   tft.print("METEO: "); 
   
@@ -1842,16 +1806,13 @@ void drawWeatherScreen() {
   drawAlarmIcon(bgCol); 
 }
 
-
 void drawGraphScreen() {
   tft.fillScreen(CYBER_BG);
 
   // Title
   tft.setTextSize(1);
-  //tft.setTextColor(CYBER_LIGHT);
   tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(4, 4);
-  //tft.print("FORECAST (Now -> +15h)");
   tft.print("Forecast Now -> +15h");
 
   if (!forecastLoaded) {
@@ -1879,12 +1840,12 @@ void drawGraphScreen() {
   int graphX = 16;       // Left margin
   int graphY = 25;       // Top margin
   int graphW = 128;      // Width
-  int graphH = 75;       // INCREASED HEIGHT (was 60)
+  int graphH = 75;       // Heigth
   int graphBot = graphY + graphH;
 
   // Draw Grid Lines (Horizontal)
-  tft.drawFastHLine(graphX - 4, graphY, graphW + 8, CYBER_DARK); // Top
-  tft.drawFastHLine(graphX - 4, graphBot, graphW + 8, CYBER_DARK); // Bottom
+  tft.drawFastHLine(graphX - 4, graphY, graphW + 8, CYBER_DARK);    // Top
+  tft.drawFastHLine(graphX - 4, graphBot, graphW + 8, CYBER_DARK);  // Bottom
 
   // --- 3. Draw "NOW" Line (Red Dotted) at Index 0 ---
   for (int y = graphY; y < graphBot; y += 4) {
@@ -1894,7 +1855,6 @@ void drawGraphScreen() {
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_RED);
   tft.setCursor(graphX - 6, graphY - 10);
-  //tft.print("NOW");
 
   // --- 4. Draw Plot ---
   int stepX = graphW / 5; // 5 segments between 6 points
@@ -1913,9 +1873,7 @@ void drawGraphScreen() {
       int nextY = map(fTemps[i+1] * 10, rangeMin * 10, rangeMax * 10, graphBot, graphY);
       int nextX = graphX + (i + 1) * stepX;
       
-      //uint16_t color = CYBER_GREEN;
       uint16_t color = ST77XX_WHITE;
-      //if (fRain[i] || fRain[i+1]) color = CYBER_BLUE;
       if (fRain[i] || fRain[i+1]) color = RAIN; 
 
       tft.drawLine(ptX[i], ptY[i], nextX, nextY, color);
@@ -1972,9 +1930,9 @@ void drawYearGrid(int dayIdx, int totalDays) {
   drawAlarmIcon(); // Keep UI consistent
 
   // 3. Grid Settings
-  // We have ~160px width. Let's do 25 columns.
+  // ~160px width -> 25 columns.
   // 160 / 25 = ~6.4 pixels per cell. 
-  // We will use 3x3 px box + 3px gap.
+  // use 3x3 px box + 3px gap.
   
   int cols = 25;
   int startX = 5; 
@@ -2028,7 +1986,7 @@ void drawYearGrid(int dayIdx, int totalDays) {
 // color: Fill color
 void drawSausageSegment(int cx, int cy, float r, float w, float startAngle, float endAngle, uint16_t color) {
   // 1. Draw the Arc Body (using radial lines for "solid" look)
-  // We step by 1 degree (or 2 for speed) to fill the arc
+  // step by 1 degree (or 2 for speed) to fill the arc
   float halfW = w / 2.0;
   float rIn  = r - halfW;
   float rOut = r + halfW;
@@ -2048,19 +2006,6 @@ void drawSausageSegment(int cx, int cy, float r, float w, float startAngle, floa
     
     tft.drawLine(x1, y1, x2, y2, color);
   }
-
-  // 2. Draw Rounded Caps (Circles at start and end)
-  // Start Cap
-  /*float radStart = startAngle * PI / 180.0;
-  int capX1 = cx + cos(radStart) * r;
-  int capY1 = cy + sin(radStart) * r;
-  tft.fillCircle(capX1, capY1, halfW, color);
-
-  // End Cap
-  float radEnd = endAngle * PI / 180.0;
-  int capX2 = cx + cos(radEnd) * r;
-  int capY2 = cy + sin(radEnd) * r;
-  tft.fillCircle(capX2, capY2, halfW, color);*/
 }
 
 void drawYearCircle(int dayIdx, int totalDays) {
@@ -2070,7 +2015,7 @@ void drawYearCircle(int dayIdx, int totalDays) {
   tft.setTextSize(1);
   tft.setTextColor(CYBER_LIGHT);
   tft.setCursor(6, 4);
-  tft.print("YEAR PROGRESS"); // Shortened to fit nicely
+  tft.print("YEAR PROGRESS");
 
   // Stats Text
   int percent = (int)(((float)(dayIdx + 1) / totalDays) * 100);
@@ -2080,9 +2025,9 @@ void drawYearCircle(int dayIdx, int totalDays) {
 
   // --- LAYOUT ---
   int cx = 80;
-  int cy = 72;        // Moved down to leave space for header
-  float radius = 38;  // Radius of the ring center
-  float thickness = 10; // Thickness of the sausage
+  int cy = 72;
+  float radius = 38;      // Radius of the ring center
+  float thickness = 10;
   
   // Month Data
   int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -2132,7 +2077,6 @@ void drawYearCircle(int dayIdx, int totalDays) {
       float fillEnd = startDeg + (span * progress);
       
       // Draw the filled portion in Accent Color (Pink/Blue)
-      // Note: If day is 0, we might draw a tiny dot, which is fine.
       drawSausageSegment(cx, cy, radius, thickness, startDeg, fillEnd, CYBER_PINK);
     }
   }
@@ -2159,6 +2103,7 @@ void drawYearCircle(int dayIdx, int totalDays) {
   tft.print(dayOfMonth + 1);
 }
 
+// ===== SETTINGS helpers =====
 void loadSettings() {
   prefs.begin("cyber-conf", true); // Open "cyber-conf" namespace (Read Only)
   
@@ -2246,11 +2191,8 @@ void setup() {
   drawEnvDynamic(curTemp, curHum, curTVOC, curECO2);
 }
 
-
-
 // ========= LOOP =========
 void loop() {
-  
 
   // 1. Read Inputs
   int encStep = readEncoderStep();
@@ -2259,7 +2201,7 @@ void loop() {
   bool encPressed = false;
   bool k0Pressed  = false;
   
-  // Use the new helper that detects HW version automatically
+  // helper that detects HW version automatically
   int reading = getRawInputState();
   
   // Only act if state has changed and debounce time passed
@@ -2272,16 +2214,9 @@ void loop() {
     }
     lastBtnState = reading;
   }
-  // -------------------------------
 
-  
-  
-
-  //V2
-  
   if (encStep != 0 || encPressed || k0Pressed) {
     
-    // --- DEBUG: Print why the timer is resetting ---
     // This prints only if the screen was idle for more than 2 seconds
     if (millis() - lastInteractionTime > 2000) { 
         Serial.print("Screen Awake reset by: ");
@@ -2290,7 +2225,6 @@ void loop() {
         if (k0Pressed)    Serial.print("Button K0 ");
         Serial.println();
     }
-    // -----------------------------------------------
 
     lastInteractionTime = millis();
     
@@ -2315,7 +2249,6 @@ void loop() {
       setScreenBrightness(0); // Turn OFF backlight
     }
   }
-  // ------------------------------------
 
   checkAlarmTrigger();
   updateAlertStateAndLED();
@@ -2470,7 +2403,7 @@ void loop() {
       unsigned long now = millis();
 
       // --- 1. HANDLE BUTTON (Click vs Long Press) ---
-      // We check the ANALOG state now, because digitalRead fails with the resistor setup.
+      // check the ANALOG state now (digitalRead fails with the resistor setup)
       static unsigned long btnDownStart = 0;
       static bool longPressHandled = false;
       
@@ -2713,8 +2646,6 @@ void loop() {
             settingsState = SET_MAIN; // Return state just in case
     
             const char* confirmItems[] = { "Cancel", "Update Now" };
-            // Simple mini-menu or just jump straight to it. 
-            // For simplicity, let's just run it:
             updateSystem(); 
             return;
           }
@@ -2836,137 +2767,130 @@ void loop() {
       }
 
       // --- STATE 6: WIFI RESET ---
- else if (settingsState == SET_WIFI) {
-  const char* wItems[] = { "Back", "Launch Portal" };
-  bool changed = false;
+      // TODO all of this needs a refactor! huge code duplication!!
+      else if (settingsState == SET_WIFI) {
+        const char* wItems[] = { "Back", "Launch Portal" };
+        bool changed = false;
 
-  if (encStep != 0) {
-    setSubIndex += encStep;
-    if (setSubIndex < 0) setSubIndex = 1;
-    if (setSubIndex > 1) setSubIndex = 0;
-    changed = true;
-  }
+        if (encStep != 0) {
+          setSubIndex += encStep;
+          if (setSubIndex < 0) setSubIndex = 1;
+          if (setSubIndex > 1) setSubIndex = 0;
+          changed = true;
+        }
 
-  if (encPressed) {
-    if (setSubIndex == 0) {
-      // User selected "Back"
-      settingsState = SET_MAIN;
-      const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi" ,"Sys Update"};
-      drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
-      return;
-    } else {
-      // User selected "Launch Portal"
-      tft.fillScreen(CYBER_BG);
-      tft.setCursor(10, 60);
-      tft.setTextColor(CYBER_ACCENT);
-      tft.print("Stopping WiFi...");
-      
-      // 1. Disconnect current WiFi
-      WiFi.disconnect();
-      delay(500);
+        if (encPressed) {
+          if (setSubIndex == 0) {
+            // User selected "Back"
+            settingsState = SET_MAIN;
+            const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi" ,"Sys Update"};
+            drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
+            return;
+          } else {
+            // User selected "Launch Portal"
+            tft.fillScreen(CYBER_BG);
+            tft.setCursor(10, 60);
+            tft.setTextColor(CYBER_ACCENT);
+            tft.print("Stopping WiFi...");
+            
+            // 1. Disconnect current WiFi
+            WiFi.disconnect();
+            delay(500);
 
-      // 2. Setup WiFiManager (Same CSS as setup)
-      WiFiManager wm;
-      
-      // --- PASTE YOUR CSS HERE (Reusing your existing style) ---
-      //const char* customCSS = "<style>body{background-color:#000000;color:#FFFFFF;font-family:'Courier New';}h1{color:#00FFFF;}button{background-color:#000000;color:#00FFFF;border:2px solid #00FFFF;}input{background-color:#1a1a1a;color:#FFFFFF;border:1px solid #00FFFF;}</style>";
-      const char* customCSS = 
-   "<style>"
-     "body {"
-      "background-color: #000000;"
-      "color: #FFFFFF;"
-      "font-family: 'Courier New', Courier, monospace;" // Retro font
-    "}"
-    // --- FIX 1: HIDE THE EXTRA WHITE TEXT ---
-    "h3 { display: none !important; }"
-    "img {"
-      "background-color: #00FFFF;"  /* Cyan background */
-      "padding: 2px;"                /* Little bit of spacing */
-      "vertical-align: middle;"      /* Aligns icon with text */
-      "border: 1px solid #00FFFF;"   /* Optional: Green border for detail */
-    "}"
+            // 2. Setup WiFiManager (Same CSS as setup)
+            WiFiManager wm;
+            
+            const char* customCSS = 
+        "<style>"
+          "body {"
+            "background-color: #000000;"
+            "color: #FFFFFF;"
+            "font-family: 'Courier New', Courier, monospace;" // Retro font
+          "}"
+          "h3 { display: none !important; }"
+          "img {"
+            "background-color: #00FFFF;"
+            "padding: 2px;"
+            "vertical-align: middle;"
+            "border: 1px solid #00FFFF;"
+          "}"
 
-  /* --- NEW: FIX FOR INVISIBLE WIFI NAMES --- */
-    "a {"
-      "color: #00FFFF;"       /* CYAN color for Wi-Fi Network names */
-      "text-decoration: none;"
-    "}"
-    "a:hover {"
-      "color: #FF00FF;"       /* PINK when you touch/hover them */
-    "}"
-    /* ---------------------------------------- */
+          "a {"
+            "color: #00FFFF;"
+            "text-decoration: none;"
+          "}"
+          "a:hover {"
+            "color: #FF00FF;"
+          "}"
 
-    "h1 {"
-      "color: #00FFFF;"       // Cyan Header
-      "text-shadow: 2px 2px #FF00FF;" // Pink shadow for 'glitch' effect
-    "}"
-    "button {"
-      "background-color: #000000;"
-      "color: #00FFFF;"
-      "border: 2px solid #00FFFF;"
-      "border-radius: 0px;"   // Sharp corners
-      "padding: 10px;"
-      "font-weight: bold;"
-      "text-transform: uppercase;"
-    "}"
-    "button:hover {"
-      "background-color: #00FFFF;"
-      "color: #000000;"
-    "}"
-    "input {"
-      "background-color: #1a1a1a;"
-      "color: #FFFFFF;"
-      "border: 1px solid #00FFFF;"
-      "border-radius: 0px;"
-      "padding: 5px;"
-    "}"
-    "div, p, form { text-align: left; }" // Center align everything
-    
-    // Add this to hide the "No AP set" status box at the bottom
-    ".mw { display: none; }"
-    
-    // ... end of style ...
-    "</style>";
-      wm.setCustomHeadElement(customCSS);
-      wm.setTitle("Ambrogio");
-      wm.setAPCallback(configModeCallback); // Re-use your callback for the screen text
+          "h1 {"
+            "color: #00FFFF;"
+            "text-shadow: 2px 2px #FF00FF;"
+          "}"
+          "button {"
+            "background-color: #000000;"
+            "color: #00FFFF;"
+            "border: 2px solid #00FFFF;"
+            "border-radius: 0px;"   // Sharp corners
+            "padding: 10px;"
+            "font-weight: bold;"
+            "text-transform: uppercase;"
+          "}"
+          "button:hover {"
+            "background-color: #00FFFF;"
+            "color: #000000;"
+          "}"
+          "input {"
+            "background-color: #1a1a1a;"
+            "color: #FFFFFF;"
+            "border: 1px solid #00FFFF;"
+            "border-radius: 0px;"
+            "padding: 5px;"
+          "}"
+          "div, p, form { text-align: left; }"
+          
+          ".mw { display: none; }"
+          
+          // ... end of style ...
+          "</style>";
 
-      // 3. Start Portal (Blocking Call)
-      // This will pause code execution until user connects or timeout
-      bool res = wm.startConfigPortal(AP_SSID, AP_PASSWORD);
+            wm.setCustomHeadElement(customCSS);
+            wm.setTitle("Ambrogio");
+            wm.setAPCallback(configModeCallback); // Re-use callback for the screen text
 
-      if (res) {
-        // Success: User connected to new network
-        tft.fillScreen(CYBER_BG);
-        tft.setCursor(10, 60);
-        tft.setTextColor(CYBER_GREEN);
-        tft.print("Success! Saving...");
-        saveCurrentNetwork(); // Save to your preferences
-        delay(2000);
-        ESP.restart(); // Restart to apply everything cleanly
-      } else {
-        // Failed / Timeout
-        tft.fillScreen(CYBER_BG);
-        tft.setCursor(10, 60);
-        tft.setTextColor(ST77XX_RED);
-        tft.print("Timed Out / Failed");
-        delay(2000);
-        
-        // Return to menu
-        settingsState = SET_MAIN;
-        const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update" };
-        drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
+            // 3. Start Portal (Blocking Call)
+            // This will pause code execution until user connects or timeout
+            bool res = wm.startConfigPortal(AP_SSID, AP_PASSWORD);
+
+            if (res) {
+              // Success: User connected to new network
+              tft.fillScreen(CYBER_BG);
+              tft.setCursor(10, 60);
+              tft.setTextColor(CYBER_GREEN);
+              tft.print("Success! Saving...");
+              saveCurrentNetwork(); // Save to preferences
+              delay(2000);
+              ESP.restart(); // Restart to apply everything cleanly
+            } else {
+              // Failed / Timeout
+              tft.fillScreen(CYBER_BG);
+              tft.setCursor(10, 60);
+              tft.setTextColor(ST77XX_RED);
+              tft.print("Timed Out / Failed");
+              delay(2000);
+              
+              // Return to menu
+              settingsState = SET_MAIN;
+              const char* mainItems[] = { "Location", "LED Mode", "Brightness", "Screen Timeout", "Reset WiFi", "Sys Update" };
+              drawListMenu("SETTINGS", mainItems, 6, setMainIndex);
+            }
+            return;
+          }
+        }
+
+        if (changed) drawListMenu("RESET WIFI?", wItems, 2, setSubIndex);
       }
-      return;
-    }
-  }
-  if (changed) drawListMenu("RESET WIFI?", wItems, 2, setSubIndex);
 
-  
-}
-
- 
-      
       // --- EXIT / BACK LOGIC (K0 Button) ---
       if (k0Pressed) {
         if (settingsState != SET_MAIN) {
@@ -3030,7 +2954,7 @@ void loop() {
         if (viewPage > 1) viewPage = 1; // Only 2 pages for now
       }
 
-      // 2. Draw ONLY if page changed (Efficient!)
+      // 2. Draw ONLY if page changed
       if (viewPage != prevViewPage) {
         prevViewPage = viewPage;
 
