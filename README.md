@@ -38,7 +38,7 @@ Be sure to create a file named "**secrets.h**" (new tab in the Arduino IDE) and 
 - [x] develop DayCounter tab (missing logic, expand on UI)
   - [ ] implement better colors
 - [x] develop Word of the Day tab
-  - [ ] optimize to use API instead of page scraping
+  - [x] optimize to use API instead of page scraping
 
 ## Crazy stuff:
 - [ ] handle phone calls

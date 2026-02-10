@@ -811,46 +811,6 @@ String fixAccents(String str) {
   return str;
 }
 
-String cleanHtml(String raw) {
-  String clean = "";
-  bool insideTag = false;
-  
-  // 1. Remove Tags
-  for (int i = 0; i < raw.length(); i++) {
-    char c = raw.charAt(i);
-    if (c == '<') {
-      insideTag = true;
-    } else if (c == '>') {
-      insideTag = false;
-      clean += " "; 
-    } else if (!insideTag) {
-      clean += c;
-    }
-  }
-  
-  // 2. Collapse spaces but KEEP Newlines
-  String finalStr = "";
-  bool spaceFound = false;
-  
-  for(int i=0; i<clean.length(); i++){
-    char c = clean.charAt(i);
-    if (c == '\n') { // Keep the newline!
-      finalStr += c;
-      spaceFound = false;
-    } 
-    else if(c == ' ' || c == '\r' || c == '\t'){
-      if(!spaceFound) {
-        finalStr += " ";
-        spaceFound = true;
-      }
-    } else {
-      finalStr += c;
-      spaceFound = false;
-    }
-  }
-  return finalStr;
-}
-
 void calculateContentHeight() {
   // Logic matches drawWordScreen exactly to ensure sync
   int cursorX = 10; 
@@ -895,101 +855,73 @@ void fetchWordOfDay() {
     return;
   }
 
-  String url = "https://unaparolaalgiorno.it/"; 
+  String url = "https://v3.unaparolaalgiorno.it/api/words/home";
 
   HTTPClient http;
   WiFiClientSecure client;
-  client.setInsecure(); 
-  
-  http.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)");
+  client.setInsecure();
+
+  http.useHTTP10(true);     // force http v. 1.0 to disable "chunked transfer encoding" and enable the http.getStream() method
+  http.addHeader("accept", "application/json");
+  http.addHeader("accept-language", "it-IT,it,q=0.5");
+  http.addHeader("origin", "https://unaparolaalgiorno.it");
+  http.addHeader("referer", "https://unaparolaalgiorno.it/");
+  http.addHeader("sec-ch-ua", "Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Brave\";v=\"144\")");
+  http.addHeader("sec-ch-ua-platform", "Linux");
+  http.addHeader("sec-fetch-dest", "empty");
+  http.addHeader("sec-fetch-mode", "cors");
+  http.addHeader("sec-fetch-site", "same-site");
+  http.addHeader("sec-gpc", "1");
+  http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36");
+
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  
+
   http.begin(client, url);
   int httpCode = http.GET();
 
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    
-    // 1. Find Word
-    int linkIndex = payload.indexOf("unaparolaalgiorno.it/significato/");
-    if (linkIndex == -1) linkIndex = payload.indexOf("/significato/");
-
-    if (linkIndex > 0) {
-       int wordStartTag = payload.indexOf(">", linkIndex);
-       int wordEndTag   = payload.indexOf("<", wordStartTag);
-       
-       String rawWord = payload.substring(wordStartTag + 1, wordEndTag);
-       rawWord.replace("LEGGI ", ""); 
-       wotdWord = fixAccents(cleanHtml(rawWord));
-
-       // 2. Find Definition
-       String searchArea = payload.substring(wordEndTag, wordEndTag + 3000);
-       
-       // Force Newlines on Block Tags
-       searchArea.replace("</div>", "\n");
-       searchArea.replace("</span>", "\n"); // Added span support
-       searchArea.replace("</p>",   "\n");
-       searchArea.replace("<br>",   "\n");
-       
-       // Force separation for the Example line
-       searchArea.replace("»", "»\n"); 
-       searchArea.replace("!", "!\n"); 
-       searchArea.replace("&raquo;", "»\n");
-
-       String cleanArea = cleanHtml(searchArea);
-       
-       String fullDefinition = "";
-       int cursor = 0;
-       bool stopReading = false;
-       
-       while (cursor < cleanArea.length() && !stopReading) {
-         int nextNewLine = cleanArea.indexOf('\n', cursor);
-         if (nextNewLine == -1) nextNewLine = cleanArea.length();
-         
-         String line = cleanArea.substring(cursor, nextNewLine);
-         
-         line = fixAccents(line);
-         line.trim();
-         
-         if (line.length() > 3) {
-           // STOP if we hit the "LEGGI" button
-           if (line.indexOf("LEGGI ") != -1 || line.indexOf("Leggi ") != -1) {
-             stopReading = true; 
-             continue; 
-           }
-
-           // --- UPDATED FILTER ---
-           // ONLY filter out junk links. KEEP quotes and "es."
-           bool isJunk = false;
-           
-           if (line.indexOf("unaparolaalgiorno") != -1) isJunk = true;
-
-           if (!isJunk) {
-              // Add double newline if we are appending to existing text
-              if (fullDefinition.length() > 0) fullDefinition += "\n\n";
-              fullDefinition += line;
-           }
-         }
-         cursor = nextNewLine + 1; 
-       }
-
-       if (fullDefinition.length() == 0) wotdDef = "Def not found.";
-       else wotdDef = fullDefinition;
-       
-       if (wotdDef.length() > 800) wotdDef = wotdDef.substring(0, 800) + "...";
-       calculateContentHeight();
-       wotdLoaded = true;
-       Serial.println("Word: " + wotdWord);
-    } else {
-      wotdWord = "Parse Error";
-      wotdDef  = "Link not found.";
-      wotdLoaded = true;
-    }
-  } else {
+  if (httpCode != HTTP_CODE_OK) {
     wotdWord = "HTTP Error";
     wotdDef  = String(httpCode);
     wotdLoaded = true;
+    return;
   }
+
+  JsonDocument filter;
+
+  auto filter_oggi = filter["oggi"].to<JsonObject>();
+  filter_oggi["parola"] = true;
+  filter_oggi["data_pubblicazione"] = true;
+  filter_oggi["etimo"] = true;
+  filter_oggi["significato"] = true;
+  filter_oggi["esempi"] = true;
+
+  JsonDocument doc;
+  auto error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+
+  if (error) {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    wotdWord = "JSON Error";
+    wotdDef = "API probably changed...";
+    wotdLoaded = true;
+    return;
+  }
+
+  auto oggi = doc["oggi"].as<JsonObject>();
+  auto oggi_parola = oggi["parola"].as<const char*>();
+  auto oggi_data_pubblicazione = oggi["data_pubblicazione"].as<const char*>();
+  auto oggi_etimo = oggi["etimo"].as<const char*>();
+  auto oggi_significato = oggi["significato"].as<const char*>();
+  auto oggi_esempi = oggi["esempi"].as<const char*>();
+
+  wotdWord = fixAccents(String(oggi_parola));
+  wotdDef = fixAccents(String(oggi_esempi)) + "\n\n" + fixAccents(String(oggi_significato)) + "\n\n" + fixAccents(String(oggi_etimo));
+
+  calculateContentHeight();
+  wotdLoaded = true;
+
+  Serial.println("wotd: " + wotdWord);
+
   http.end();
 }
 
@@ -1009,11 +941,12 @@ void drawWordScreen(int scrollOffset, bool fullRedraw) {
     tft.setTextSize(2);
     
     // Center the Title
-    int wLen = wotdWord.length() * 12;
-    int xPos = (160 - wLen) / 2;
-    if(xPos < 0) xPos = 0;
+    //int wLen = wotdWord.length() * 12;
+    //int xPos = (160 - wLen) / 2;
+    //if(xPos < 0) xPos = 0;
+    int xPos = 10;
     
-    tft.setCursor(xPos, 5); 
+    tft.setCursor(xPos, 20);
     tft.print(wotdWord);
     
   } else {
@@ -1034,7 +967,7 @@ void drawWordScreen(int scrollOffset, bool fullRedraw) {
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE, CYBER_BG);
 
-  int startY = 45 - scrollOffset; 
+  int startY = headerLimit - scrollOffset;
   int cursorX = 10; 
   int cursorY = startY;
   int lineHeight = 10;
