@@ -861,7 +861,6 @@ void fetchWordOfDay() {
   WiFiClientSecure client;
   client.setInsecure();
 
-  http.useHTTP10(true);     // force http v. 1.0 to disable "chunked transfer encoding" and enable the http.getStream() method
   http.addHeader("accept", "application/json");
   http.addHeader("accept-language", "it-IT,it,q=0.5");
   http.addHeader("origin", "https://unaparolaalgiorno.it");
@@ -896,7 +895,8 @@ void fetchWordOfDay() {
   filter_oggi["esempi"] = true;
 
   JsonDocument doc;
-  auto error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  auto payload = http.getString();
+  auto error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
 
   if (error) {
     Serial.print("deserializeJson() failed: ");
